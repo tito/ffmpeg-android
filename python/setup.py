@@ -20,9 +20,12 @@ ext_files = ['ffmpeg/_ffmpeg.pyx']
 if not have_cython:
     # android build ?
     ext_files = [x.replace('.pyx', '.c') for x in ext_files]
-    include_dirs = ['../build/ffmpeg/armeabi-v7a/include/']
+    include_dirs = [
+        '../build/ffmpeg/armeabi-v7a/include/',
+        '/home/tito/code/pgs4a-kivy/jni/sdl/include'
+    ]
     p = realpath('../ffmpeg/')
-    libraries = ['gcc', 'z', 'SDL']
+    libraries = ['gcc', 'z', 'sdl']
     extra_objects = [
         join(p, 'libavcodec', 'libavcodec.a'),
         join(p, 'libavformat', 'libavformat.a'),
@@ -34,6 +37,8 @@ if not have_cython:
         join(p, 'libavutil', 'libavutil.a'),
         #join(p, 'libpostproc', 'libavpostproc.a'),
         ]
+else:
+    include_dirs.append('/usr/include/SDL')
 
 ext = Extension(
     'ffmpeg._ffmpeg',

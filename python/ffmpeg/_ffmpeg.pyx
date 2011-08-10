@@ -12,6 +12,13 @@ Some note from debugging stuff:
     #. When we are doing thread, since we are in python, force the GIL to be
     acquired by adding "with gil" at the end of the callback/main thread func.
 
+    #. On android, seem that --embed on cython don't do threads initialization.
+    __PYX_FORCE_INIT_THREADS missing ?
+
+TODO:
+
+    - handle error case (looping on schedule/refresh even when no video)
+
 '''
 
 include '_ffmpeg.pxi'
@@ -824,7 +831,7 @@ cdef int decode_interrupt_cb():
         return global_video_state.quit
     return 0
 
-cdef int decode_thread(void *arg) with gil:
+cdef int decode_thread(void *arg):
     cdef VideoState *vs = <VideoState *>arg
     cdef AVFormatContext *pFormatCtx = NULL
     cdef AVPacket pkt1, *packet = &pkt1
@@ -834,11 +841,6 @@ cdef int decode_thread(void *arg) with gil:
     cdef int stream_index = -1
     cdef int64_t seek_target = 0
     cdef AVRational AV_TIME_BASE_Q
-
-    print 'hello world'
-    from time import sleep
-    sleep(1)
-    print 'sleep done.'
 
     AV_TIME_BASE_Q.num = 1
     AV_TIME_BASE_Q.den = 1000000
@@ -872,7 +874,6 @@ cdef int decode_thread(void *arg) with gil:
         if codec_type == CODEC_TYPE_AUDIO and audio_index < 0:
             audio_index = i
         
-    
     if audio_index >= 0:
         stream_component_open(vs, audio_index)
     
@@ -882,8 +883,13 @@ cdef int decode_thread(void *arg) with gil:
 
     if vs.videoStream < 0 or vs.audioStream < 0:
         print '%s: could not open codecs' % vs.filename
-        event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
-        return 0
+        if vs.audioStream < 0:
+            print '%s: cannot open for audio' % vs.filename
+        if vs.videoStream < 0:
+            print '%s: cannot open for video' % vs.filename
+        if vs.videoStream < 0:
+            event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
+            return 0
     
 
     # main decode loop
@@ -910,7 +916,8 @@ cdef int decode_thread(void *arg) with gil:
             
             if not av_seek_frame(vs.pFormatCtx, stream_index,
                     seek_target, vs.seek_flags):
-                print '%s: error while seeking' % vs.pFormatCtx.filename
+                #print '%s: error while seeking' % vs.pFormatCtx.filename
+                pass
             else:
                 if vs.audioStream >= 0:
                     packet_queue_flush(&vs.audioq)
@@ -950,6 +957,10 @@ cdef int decode_thread(void *arg) with gil:
     
     return 0
 
+cdef int __decode_thread(void *arg) nogil:
+    with gil:
+        return decode_thread(arg)
+
 cdef class ScheduledEvent:
     cdef Event *event
 
@@ -968,9 +979,9 @@ cdef class FFVideo:
 
     def __init__(self, filename):
         self.filename = filename
-        self.open()
+        PyEval_InitThreads()
 
-    cdef void open(self):
+    def open(self):
         cdef int i
         cdef VideoState *vs
         global g_have_register
@@ -995,9 +1006,11 @@ cdef class FFVideo:
         schedule_refresh(vs, 40)
 
         vs.av_sync_type = DEFAULT_AV_SYNC_TYPE
-        vs.parse_tid = SDL_CreateThread(decode_thread, vs)
+        with nogil:
+            vs.parse_tid = SDL_CreateThread(__decode_thread, vs)
         if vs.parse_tid == NULL:
             av_free(vs)
+            self.vs = NULL
 
         av_init_packet(&flush_pkt)
         flush_pkt.data = <uint8_t *><char *>'FLUSH'
@@ -1006,7 +1019,9 @@ cdef class FFVideo:
         cdef Event *event
         cdef int curtime, itime
         cdef ScheduledEvent se
-        cdef int64_t
+
+        if self.vs == NULL:
+            return
 
         curtime = av_gettime()
         # check our own events
@@ -1015,7 +1030,7 @@ cdef class FFVideo:
             if curtime < itime:
                 continue
             self.events.remove(item)
-            print 'xx execute callback, delay was', se.event.delay
+            #print 'xx execute callback, delay was', se.event.delay
             se.event.callback(se.event.userdata)
             free(se.event)
 
@@ -1024,11 +1039,12 @@ cdef class FFVideo:
             event = event_queue_get(&self.vs.eq)
             if event == NULL:
                 return
-            print 'execute event', event.name
+            #print 'execute event', event.name
             if event.name == FF_ALLOC_EVENT:
                 alloc_picture(event.userdata)
             elif event.name == FF_REFRESH_EVENT:
-                video_refresh_timer(event.userdata)
+                if self.vs.quit == 0:
+                    video_refresh_timer(event.userdata)
             elif event.name == FF_QUIT_EVENT:
                 self.vs.quit = 1
                 self.stop()
@@ -1041,12 +1057,16 @@ cdef class FFVideo:
 
     cpdef int get_width(self):
         cdef VideoState *vs = self.vs
+        if vs == NULL:
+            return -1
         if vs.video_st == NULL or vs.video_st.codec == NULL:
             return -1
         return vs.video_st.codec.width
 
     cpdef int get_height(self):
         cdef VideoState *vs = self.vs
+        if vs == NULL:
+            return -1
         if vs.video_st == NULL or vs.video_st.codec == NULL:
             return -1
         return vs.video_st.codec.height
