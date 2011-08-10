@@ -11,27 +11,28 @@ if __name__ == '__main__':
     from kivy.base import runTouchApp
     from kivy.clock import Clock
 
-    print 'before ffvideo'
+    tex = None
     video = FFVideo(sys.argv[1])
-    print 'after ffvideo'
 
-    tex = Texture.create(size=(video.get_width(), video.get_height()), colorfmt='rgb')
-    tex.flip_vertical()
     img = Image()
     img.texture = tex
 
-    print 'create texture'
-
     def queue_frame(dt):
+        print '==== queue frame asked.'
+        global tex
         frame = video.get_next_frame()
         if frame is None:
             return
+        if tex is None:
+            tex = Texture.create(size=(
+                video.get_width(), video.get_height()), colorfmt='rgb')
+            tex.flip_vertical()
         tex.blit_buffer(frame)
         img.texture = None
         img.texture = tex
 
     print 'schedule it'
-    Clock.schedule_interval(queue_frame, 0)
+    Clock.schedule_interval(queue_frame, 1 / 60.)
 
     print 'run it'
     runTouchApp(img)

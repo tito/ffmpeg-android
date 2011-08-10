@@ -125,6 +125,7 @@ cdef struct VideoState:
     int             quit
     EventQueue      eq
     SwsContext      *img_convert_ctx
+    unsigned char   *pixels
 
 cdef VideoState *global_video_state = NULL
 
@@ -143,13 +144,15 @@ cdef Event *event_create():
     return event
 
 cdef void event_queue_put(EventQueue *q, Event *e):
-    with nogil: SDL_LockMutex(q.mutex)
+    with nogil:
+        SDL_LockMutex(q.mutex)
     if q.last != NULL:
         q.last.next = e
     q.last = e
     if q.first == NULL:
         q.first = e
-    SDL_UnlockMutex(q.mutex)
+    with nogil:
+        SDL_UnlockMutex(q.mutex)
 
 cdef void event_queue_put_fast(EventQueue *q, int name, void *userdata):
     cdef Event *e = event_create()
@@ -159,13 +162,15 @@ cdef void event_queue_put_fast(EventQueue *q, int name, void *userdata):
 
 cdef Event *event_queue_get(EventQueue *q):
     cdef Event *e = NULL
-    with nogil: SDL_LockMutex(q.mutex)
+    with nogil:
+        SDL_LockMutex(q.mutex)
     if q.first != NULL:
         e = q.first
         q.first = q.first.next
     if q.first == NULL:
         q.last = NULL
-    SDL_UnlockMutex(q.mutex)
+    with nogil:
+        SDL_UnlockMutex(q.mutex)
     return e
 
 #
@@ -191,7 +196,8 @@ cdef int packet_queue_put(PacketQueue *q, AVPacket *pkt):
     memcpy(&pkt1.pkt, pkt, sizeof(AVPacket))
     pkt1.next = NULL
 
-    with nogil: SDL_LockMutex(q.mutex)
+    with nogil:
+        SDL_LockMutex(q.mutex)
 
     if q.last_pkt == NULL:
         q.first_pkt = pkt1
@@ -201,9 +207,9 @@ cdef int packet_queue_put(PacketQueue *q, AVPacket *pkt):
     q.nb_packets += 1
     q.size += pkt1.pkt.size
 
-    with nogil: SDL_CondSignal(q.cond)
-
-    SDL_UnlockMutex(q.mutex)
+    with nogil:
+        SDL_CondSignal(q.cond) 
+        SDL_UnlockMutex(q.mutex)
 
     return 0
 
@@ -212,7 +218,8 @@ cdef int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block):
     cdef AVPacketList *pkt1
     cdef int ret = -1
 
-    with nogil: SDL_LockMutex(q.mutex)
+    with nogil:
+        SDL_LockMutex(q.mutex)
 
     while True:
 
@@ -238,7 +245,8 @@ cdef int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block):
         else:
             with nogil: SDL_CondWait(q.cond, q.mutex)
 
-    SDL_UnlockMutex(q.mutex)
+    with nogil:
+        SDL_UnlockMutex(q.mutex)
 
     return ret
 
@@ -246,7 +254,8 @@ cdef int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block):
 cdef void packet_queue_flush(PacketQueue *q):
     cdef AVPacketList *pkt, *pkt1
 
-    with nogil: SDL_LockMutex(q.mutex)
+    with nogil:
+        SDL_LockMutex(q.mutex)
     pkt = q.first_pkt
     while pkt != NULL:
         pkt1 = pkt.next
@@ -257,7 +266,8 @@ cdef void packet_queue_flush(PacketQueue *q):
     q.first_pkt = NULL
     q.nb_packets = 0
     q.size = 0
-    SDL_UnlockMutex(q.mutex)
+    with nogil:
+        SDL_UnlockMutex(q.mutex)
 
 
 cdef double get_audio_clock(VideoState *vs):
@@ -356,7 +366,7 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
 
     while True:
 
-        while audio_pkt_size > 0:
+        while vs.audio_pkt_size > 0:
 
             data_size = buf_size
 
@@ -366,7 +376,7 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
 
             if len1 < 0:
                 # if error, skip frame
-                audio_pkt_size = 0
+                vs.audio_pkt_size = 0
                 break
             vs.audio_pkt_data += len1
             vs.audio_pkt_size -= len1
@@ -436,6 +446,7 @@ cdef void audio_callback(void *userdata, unsigned char *stream, int l) with gil:
 
 cdef void refresh_timer_cb(void *data):
     cdef VideoState *vs = <VideoState *>data
+    print 'refresh_timer_cb()'
     event_queue_put_fast(&vs.eq, FF_REFRESH_EVENT, vs)
 
 cdef void schedule_refresh(VideoState *vs, int delay):
@@ -445,16 +456,46 @@ cdef void schedule_refresh(VideoState *vs, int delay):
     e.callback = <event_callback_t>refresh_timer_cb
     e.delay = delay
     event_queue_put(&vs.eq, e)
+    print 'schedule_refresh()'
 
 cdef void video_display(VideoState *vs):
-    # XXX IMPLEMENT
-    pass
+    cdef int width = vs.video_st.codec.width
+    cdef int height = vs.video_st.codec.height
+    cdef int index, y
+    cdef AVFrame *rgb
+
+    if width == -1:
+        return
+
+    print 'video_display()', vs.pictq_rindex
+
+    with nogil:
+        SDL_LockMutex(vs.pictq_mutex)
+
+    size = width * height * 3
+    if vs.pixels == NULL:
+        vs.pixels = <unsigned char *>malloc(size * sizeof(unsigned char))
+    if vs.pixels != NULL:
+        rgb = vs.pictq[vs.pictq_rindex].bmp
+        if rgb != NULL:
+            # copy frame into pixels
+            index = 0
+            for y in xrange(height):
+                memcpy(&vs.pixels[index], rgb.data[0] + \
+                        y * rgb.linesize[0], width * 3)
+                index += width * 3
+
+    with nogil:
+        SDL_UnlockMutex(vs.pictq_mutex)
+
 
 cdef void video_refresh_timer(void *userdata):
 
     cdef VideoState *vs = <VideoState *>userdata
     cdef VideoPicture *vp
     cdef double actual_delay, delay, sync_threshold, ref_clock, diff
+
+    print 'video_refresh_timer()'
     
     if vs.video_st:
         if vs.pictq_size == 0:
@@ -505,10 +546,12 @@ cdef void video_refresh_timer(void *userdata):
             if vs.pictq_rindex == VIDEO_PICTURE_QUEUE_SIZE:
                 vs.pictq_rindex = 0
             
-            with nogil: SDL_LockMutex(vs.pictq_mutex)
+            with nogil:
+                SDL_LockMutex(vs.pictq_mutex)
             vs.pictq_size -= 1
-            with nogil: SDL_CondSignal(vs.pictq_cond)
-            SDL_UnlockMutex(vs.pictq_mutex)
+            with nogil:
+                SDL_CondSignal(vs.pictq_cond)
+                SDL_UnlockMutex(vs.pictq_mutex)
         
     else:
         schedule_refresh(vs, 100)
@@ -531,10 +574,15 @@ cdef void alloc_picture(void *userdata):
     avpicture_fill(<AVPicture *>vp.bmp, vp.ff_data, PixelFormats.RGB24,
             vp.width, vp.height)
 
-    with nogil: SDL_LockMutex(vs.pictq_mutex)
+    print 'alloc_picture() lock'
+    with nogil:
+        SDL_LockMutex(vs.pictq_mutex)
     vp.allocated = 1
-    with nogil: SDL_CondSignal(vs.pictq_cond)
-    SDL_UnlockMutex(vs.pictq_mutex)
+    print 'alloc_picture() send signal'
+    with nogil:
+        SDL_CondSignal(vs.pictq_cond)
+        SDL_UnlockMutex(vs.pictq_mutex)
+    print 'alloc_picture() sent & unlock'
 
 cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
     cdef VideoPicture *vp
@@ -542,12 +590,21 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
     cdef AVPicture pict
     cdef SDL_UserEvent event
 
+    print 'queue_picture()', vs.pictq_size
+
     # wait until we have space for a new pic
-    with nogil: SDL_LockMutex(vs.pictq_mutex)
+    with nogil:
+        SDL_LockMutex(vs.pictq_mutex)
+    print 'queue_picture() after lock'
     while vs.pictq_size >= VIDEO_PICTURE_QUEUE_SIZE and not vs.quit:
-        with nogil: SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
+        print 'queue_picture() inside while', vs.pictq_size, VIDEO_PICTURE_QUEUE_SIZE, vs.quit
+        with nogil:
+            SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
     
-    SDL_UnlockMutex(vs.pictq_mutex)
+    with nogil:
+        SDL_UnlockMutex(vs.pictq_mutex)
+
+    print 'queue_picture() after mutex'
 
     if vs.quit:
         return -1
@@ -565,9 +622,12 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
         event_queue_put_fast(&vs.eq, FF_ALLOC_EVENT, vs)
 
         # wait until we have a picture allocated 
-        with nogil: SDL_LockMutex(vs.pictq_mutex)
+        with nogil:
+            SDL_LockMutex(vs.pictq_mutex)
+        print 'here !!!'
         while not vp.allocated and not vs.quit:
-            with nogil: SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
+            with nogil:
+                SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
         
         SDL_UnlockMutex(vs.pictq_mutex)
         if vs.quit:
@@ -584,17 +644,6 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
 
         dst_pix_fmt = PixelFormats.RGB24
 
-        # determine required buffer size and allocate
-        '''
-        pict.data[0] = vp.bmp.pixels[0]
-        pict.data[1] = vp.bmp.pixels[2]
-        pict.data[2] = vp.bmp.pixels[1]
-
-        pict.linesize[0] = vp.bmp.pitches[0]
-        pict.linesize[1] = vp.bmp.pitches[2]
-        pict.linesize[2] = vp.bmp.pitches[1]
-        '''
-        
         # Convert the image into YUV format that SDL uses
         if vs.img_convert_ctx == NULL:
             w = vs.video_st.codec.width
@@ -616,7 +665,8 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
         if vs.pictq_windex == VIDEO_PICTURE_QUEUE_SIZE:
             vs.pictq_windex = 0
         
-        with nogil: SDL_LockMutex(vs.pictq_mutex)
+        with nogil:
+            SDL_LockMutex(vs.pictq_mutex)
         vs.pictq_size += 1
         SDL_UnlockMutex(vs.pictq_mutex)
     
@@ -648,8 +698,8 @@ cdef int our_get_buffer(AVCodecContext *c, AVFrame *pic):
 
 
 cdef void our_release_buffer(AVCodecContext *c, AVFrame *pic):
-    if pic != NULL:
-        av_freep(pic.opaque)
+    # XXX FIXME!
+    #if pic != NULL: av_freep(pic.opaque)
     avcodec_default_release_buffer(c, pic)
         
 
@@ -661,6 +711,8 @@ cdef int video_thread(void *arg) with gil:
     cdef double pts, ptst = 0
 
     pFrame = avcodec_alloc_frame()
+
+    print 'video_thread() started'
 
     while True:
         if packet_queue_get(&vs.videoq, packet, 1) < 0:
@@ -692,12 +744,15 @@ cdef int video_thread(void *arg) with gil:
 
         # Did we get a video frame?
         if frameFinished:
+            print 'video_thread() got frame, synchronize'
             pts = synchronize_video(vs, pFrame, pts)
+            print 'video_thread() queue picture'
             if queue_picture(vs, pFrame, pts) < 0:
                 break
             
         av_free_packet(packet)
     
+    print 'video_thread() leaved'
     av_free(pFrame)
     return 0
 
@@ -902,14 +957,12 @@ class FFVideoException(Exception):
     pass
 
 cdef class FFVideo:
-    cdef unsigned char  *pixels
     cdef bytes filename
     cdef VideoState *vs
     cdef list events
 
     def __cinit__(self, filename):
         self.filename = None
-        self.pixels = NULL
         self.vs = NULL
         self.events = []
 
@@ -938,6 +991,9 @@ cdef class FFVideo:
             len(self.filename)))
         vs.pictq_mutex = SDL_CreateMutex()
         vs.pictq_cond = SDL_CreateCond()
+
+        schedule_refresh(vs, 40)
+
         vs.av_sync_type = DEFAULT_AV_SYNC_TYPE
         vs.parse_tid = SDL_CreateThread(decode_thread, vs)
         if vs.parse_tid == NULL:
@@ -950,8 +1006,9 @@ cdef class FFVideo:
         cdef Event *event
         cdef int curtime, itime
         cdef ScheduledEvent se
+        cdef int64_t
 
-        curtime = time()
+        curtime = av_gettime()
         # check our own events
         for item in self.events[:]:
             itime, se = item
@@ -978,7 +1035,7 @@ cdef class FFVideo:
             elif event.name == FF_SCHEDULE_EVENT:
                 se = ScheduledEvent()
                 se.event = event
-                self.events.append((curtime + event.delay, se))
+                self.events.append((curtime + event.delay * 1000., se))
                 continue # don't free event in that case
             free(event)
 
@@ -995,27 +1052,25 @@ cdef class FFVideo:
         return vs.video_st.codec.height
 
     def get_next_frame(self):
-        self.update()
-        print self.get_width(), self.get_height()
-        return
         cdef int size, y, index
-        cdef int width = self.get_width()
-        cdef int height = self.get_height()
-        size = width * height * 3
-        if self.pixels == NULL:
-            self.pixels = <unsigned char *>malloc(size * sizeof(unsigned char))
-        if self.pixels == NULL:
-            raise FFVideoException('Unable to allocate memory for frame')
+        cdef int width, height
+        cdef AVFrame *rgb
+        cdef VideoState *vs = self.vs
 
-        # do one update
         self.update()
 
-        # copy frame into pixels
-        index = 0
-        for y in xrange(self.get_height()):
-            memcpy(&self.pixels[index], self.ff_frame_rgb.data[0] + \
-                    y * self.ff_frame_rgb.linesize[0], width * 3)
-            index += width * 3
+        if self.get_width() == -1:
+            return
 
-        return PyString_FromStringAndSize(<char *>self.pixels, size)
+        ret = None
+        size = self.get_width() * self.get_height() * 3
+        with nogil:
+            SDL_LockMutex(vs.pictq_mutex)
+        if vs.pixels != NULL:
+            ret = PyString_FromStringAndSize(<char *>vs.pixels, size)
+        with nogil:
+            SDL_UnlockMutex(vs.pictq_mutex)
+
+        return ret
+
 
