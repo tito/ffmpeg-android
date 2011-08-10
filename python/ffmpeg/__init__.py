@@ -24,6 +24,8 @@ if __name__ == '__main__':
 
     def queue_frame(dt):
         frame = video.get_next_frame()
+        if frame is None:
+            return
         tex.blit_buffer(frame)
         img.texture = None
         img.texture = tex

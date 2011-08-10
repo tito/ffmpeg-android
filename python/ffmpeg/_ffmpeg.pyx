@@ -6,9 +6,17 @@ References:
     http://bambuser.com/opensource
     https://github.com/tranx/pyffmpeg/blob/master/pyffmpeg.pyx
     http://dranger.com/ffmpeg/
+
+Some note from debugging stuff:
+
+    #. When we are doing thread, since we are in python, force the GIL to be
+    acquired by adding "with gil" at the end of the callback/main thread func.
+
 '''
 
 include '_ffmpeg.pxi'
+
+from time import time
 
 cdef int g_have_register = 0
 cdef AVPacket flush_pkt
@@ -26,7 +34,9 @@ cdef struct VideoPicture:
     int height
     int allocated
     double pts
-    uint8_t *bmp
+    AVFrame *bmp
+    unsigned char *ff_data
+    unsigned ff_data_size
 
 #
 # Taken from tutorial 8
@@ -49,13 +59,27 @@ DEF AV_SYNC_AUDIO_MASTER            = 0
 DEF AV_SYNC_VIDEO_MASTER            = 1
 DEF AV_SYNC_EXTERNAL_MASTER         = 2
 
-#DEF DEFAULT_AV_SYNC_TYPE            = AV_SYNC_VIDEO_MASTER
-DEF SDL_USEREVENT                   = 24 
-DEF FF_ALLOC_EVENT                  = (SDL_USEREVENT)
-DEF FF_REFRESH_EVENT                = (SDL_USEREVENT + 1)
-DEF FF_QUIT_EVENT                   = (SDL_USEREVENT + 2)
+DEF DEFAULT_AV_SYNC_TYPE            = AV_SYNC_VIDEO_MASTER
+DEF FF_ALLOC_EVENT                  = 1
+DEF FF_REFRESH_EVENT                = 2
+DEF FF_QUIT_EVENT                   = 3
+DEF FF_SCHEDULE_EVENT               = 4
 
 cdef uint64_t global_video_pkt_pts = AV_NOPTS_VALUE
+
+ctypedef void (*event_callback_t)(void *)
+
+cdef struct Event:
+    int name
+    void *userdata
+    int delay
+    event_callback_t callback
+    Event *next
+
+cdef struct EventQueue:
+    Event *first
+    Event *last
+    SDL_mutex *mutex
 
 cdef struct VideoState:
     AVFormatContext *pFormatCtx
@@ -99,7 +123,54 @@ cdef struct VideoState:
     SDL_Thread      *video_tid
     char            filename[1024]
     int             quit
+    EventQueue      eq
+    SwsContext      *img_convert_ctx
 
+cdef VideoState *global_video_state = NULL
+
+#
+# User event queue, to communicate between thread and python class
+# No python used, to be able at some time to remove GIL usage.
+#
+
+cdef void event_queue_init(EventQueue *q):
+    memset(q, 0, sizeof(EventQueue))
+    q.mutex = SDL_CreateMutex()
+
+cdef Event *event_create():
+    cdef Event *event = <Event *>malloc(sizeof(Event))
+    memset(event, 0, sizeof(Event))
+    return event
+
+cdef void event_queue_put(EventQueue *q, Event *e):
+    with nogil: SDL_LockMutex(q.mutex)
+    if q.last != NULL:
+        q.last.next = e
+    q.last = e
+    if q.first == NULL:
+        q.first = e
+    SDL_UnlockMutex(q.mutex)
+
+cdef void event_queue_put_fast(EventQueue *q, int name, void *userdata):
+    cdef Event *e = event_create()
+    e.name = name
+    e.userdata = userdata
+    event_queue_put(q, e)
+
+cdef Event *event_queue_get(EventQueue *q):
+    cdef Event *e = NULL
+    with nogil: SDL_LockMutex(q.mutex)
+    if q.first != NULL:
+        e = q.first
+        q.first = q.first.next
+    if q.first == NULL:
+        q.last = NULL
+    SDL_UnlockMutex(q.mutex)
+    return e
+
+#
+# Packet Queue
+#
 
 cdef void packet_queue_init(PacketQueue *q):
     memset(q, 0, sizeof(PacketQueue))
@@ -107,7 +178,7 @@ cdef void packet_queue_init(PacketQueue *q):
     q.cond = SDL_CreateCond()
 
 
-cdef int packet_queue_put(PacketQueue *q, AVPacket *pkt) :
+cdef int packet_queue_put(PacketQueue *q, AVPacket *pkt):
     cdef AVPacketList *pkt1
 
     if av_dup_packet(pkt) < 0:
@@ -156,7 +227,6 @@ cdef int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block):
             if q.first_pkt == NULL:
                 q.last_pkt = NULL
             q.nb_packets -= 1
-            print 'left', q.nb_packets
             q.size -= pkt1.pkt.size
             memcpy(pkt, &pkt1.pkt, sizeof(AVPacket))
             av_free(pkt1)
@@ -281,7 +351,7 @@ cdef int synchronize_audio(VideoState *vs, short *samples,
 cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
         double *pts_ptr):
     cdef AVPacket *pkt = &vs.audio_pkt
-    cdef int len1, data_size
+    cdef int len1, data_size, n
     cdef double pts
 
     while True:
@@ -364,10 +434,17 @@ cdef void audio_callback(void *userdata, unsigned char *stream, int l) with gil:
         stream += len1
         vs.audio_buf_index += len1
 
+cdef void refresh_timer_cb(void *data):
+    cdef VideoState *vs = <VideoState *>data
+    event_queue_put_fast(&vs.eq, FF_REFRESH_EVENT, vs)
+
 cdef void schedule_refresh(VideoState *vs, int delay):
-    # XXX IMPLEMENT
-    # SDL_AddTimer(delay, sdl_refresh_timer_cb, vs)
-    pass
+    cdef Event *e = event_create()
+    e.name = FF_SCHEDULE_EVENT
+    e.userdata = vs
+    e.callback = <event_callback_t>refresh_timer_cb
+    e.delay = delay
+    event_queue_put(&vs.eq, e)
 
 cdef void video_display(VideoState *vs):
     # XXX IMPLEMENT
@@ -428,9 +505,9 @@ cdef void video_refresh_timer(void *userdata):
             if vs.pictq_rindex == VIDEO_PICTURE_QUEUE_SIZE:
                 vs.pictq_rindex = 0
             
-            SDL_LockMutex(vs.pictq_mutex)
+            with nogil: SDL_LockMutex(vs.pictq_mutex)
             vs.pictq_size -= 1
-            SDL_CondSignal(vs.pictq_cond)
+            with nogil: SDL_CondSignal(vs.pictq_cond)
             SDL_UnlockMutex(vs.pictq_mutex)
         
     else:
@@ -442,26 +519,33 @@ cdef void alloc_picture(void *userdata):
 
     vp = &vs.pictq[vs.pictq_windex]
     if vp.bmp:
+        assert(0)
         free(vp.bmp)
     vp.width = vs.video_st.codec.width
     vp.height = vs.video_st.codec.height
-    vp.bmp = <uint8_t *>malloc(vp.width * vp.height * 3)
-    SDL_LockMutex(vs.pictq_mutex)
+
+    vp.ff_data_size = avpicture_get_size(PixelFormats.RGB24,
+            vp.width, vp.height)
+    vp.ff_data = <unsigned char *>av_malloc(vp.ff_data_size * sizeof(unsigned char))
+    vp.bmp = avcodec_alloc_frame()
+    avpicture_fill(<AVPicture *>vp.bmp, vp.ff_data, PixelFormats.RGB24,
+            vp.width, vp.height)
+
+    with nogil: SDL_LockMutex(vs.pictq_mutex)
     vp.allocated = 1
-    SDL_CondSignal(vs.pictq_cond)
+    with nogil: SDL_CondSignal(vs.pictq_cond)
     SDL_UnlockMutex(vs.pictq_mutex)
 
 cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
     cdef VideoPicture *vp
     cdef int dst_pix_fmt
     cdef AVPicture pict
-    cdef SwsContext *img_convert_ctx
     cdef SDL_UserEvent event
 
     # wait until we have space for a new pic
-    SDL_LockMutex(vs.pictq_mutex)
+    with nogil: SDL_LockMutex(vs.pictq_mutex)
     while vs.pictq_size >= VIDEO_PICTURE_QUEUE_SIZE and not vs.quit:
-        SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
+        with nogil: SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
     
     SDL_UnlockMutex(vs.pictq_mutex)
 
@@ -478,14 +562,12 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
         vp.allocated = 0
 
         # we have to do it in the main thread
-        event.type = FF_ALLOC_EVENT
-        event.data1 = vs
-        SDL_PushEvent(<SDL_Event *>&event)
+        event_queue_put_fast(&vs.eq, FF_ALLOC_EVENT, vs)
 
         # wait until we have a picture allocated 
-        SDL_LockMutex(vs.pictq_mutex)
+        with nogil: SDL_LockMutex(vs.pictq_mutex)
         while not vp.allocated and not vs.quit:
-            SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
+            with nogil: SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
         
         SDL_UnlockMutex(vs.pictq_mutex)
         if vs.quit:
@@ -502,6 +584,7 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
 
         dst_pix_fmt = PixelFormats.RGB24
 
+        # determine required buffer size and allocate
         '''
         pict.data[0] = vp.bmp.pixels[0]
         pict.data[1] = vp.bmp.pixels[2]
@@ -513,18 +596,18 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
         '''
         
         # Convert the image into YUV format that SDL uses
-        if img_convert_ctx == NULL:
+        if vs.img_convert_ctx == NULL:
             w = vs.video_st.codec.width
             h = vs.video_st.codec.height
-            img_convert_ctx = sws_getContext(w, h, 
+            vs.img_convert_ctx = sws_getContext(w, h, 
                     vs.video_st.codec.pix_fmt, w, h, 
                     dst_pix_fmt, 4, NULL, NULL, NULL)
-            if img_convert_ctx == NULL:
+            if vs.img_convert_ctx == NULL:
                 print 'Cannot initialize the conversion context!'
                 return -1
         
-        sws_scale(img_convert_ctx, pFrame.data, pFrame.linesize,
-                    0, vs.video_st.codec.height, pict.data, pict.linesize)
+        sws_scale(vs.img_convert_ctx, pFrame.data, pFrame.linesize,
+                    0, vs.video_st.codec.height, vp.bmp.data, vp.bmp.linesize)
         
         vp.pts = pts
 
@@ -533,7 +616,7 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
         if vs.pictq_windex == VIDEO_PICTURE_QUEUE_SIZE:
             vs.pictq_windex = 0
         
-        SDL_LockMutex(vs.pictq_mutex)
+        with nogil: SDL_LockMutex(vs.pictq_mutex)
         vs.pictq_size += 1
         SDL_UnlockMutex(vs.pictq_mutex)
     
@@ -570,12 +653,12 @@ cdef void our_release_buffer(AVCodecContext *c, AVFrame *pic):
     avcodec_default_release_buffer(c, pic)
         
 
-cdef int video_thread(void *arg):
+cdef int video_thread(void *arg) with gil:
     cdef VideoState *vs = <VideoState *>arg
     cdef AVPacket pkt1, *packet = &pkt1
-    cdef int len1, frameFinished
+    cdef int len1, frameFinished = 0
     cdef AVFrame *pFrame
-    cdef double pts, ptst
+    cdef double pts, ptst = 0
 
     pFrame = avcodec_alloc_frame()
 
@@ -593,8 +676,8 @@ cdef int video_thread(void *arg):
         # Save global pts to be stored in pFrame
         global_video_pkt_pts = packet.pts
         # Decode video frame
-        len1 = avcodec_decode_video(vs.video_st.codec, pFrame, &frameFinished, 
-                                packet.data, packet.size)
+        len1 = avcodec_decode_video2(vs.video_st.codec, pFrame, &frameFinished, 
+                                packet)
         if packet.dts == AV_NOPTS_VALUE and pFrame.opaque:
             memcpy(&ptst, pFrame.opaque, sizeof(uint64_t))
             if ptst != AV_NOPTS_VALUE:
@@ -618,45 +701,217 @@ cdef int video_thread(void *arg):
     av_free(pFrame)
     return 0
 
+cdef int stream_component_open(VideoState *vs, int stream_index):
+    cdef AVFormatContext *pFormatCtx = vs.pFormatCtx
+    cdef AVCodecContext *codecCtx
+    cdef AVCodec *codec
+    cdef SDL_AudioSpec wanted_spec, spec
+
+    if stream_index < 0 or stream_index >= pFormatCtx.nb_streams:
+        return -1
+    
+    # Get a pointer to the codec context for the video stream
+    codecCtx = pFormatCtx.streams[stream_index].codec
+
+    if codecCtx.codec_type == CODEC_TYPE_AUDIO:
+        # Set audio settings from codec info
+        wanted_spec.freq = codecCtx.sample_rate
+        wanted_spec.format = AUDIO_S16SYS
+        wanted_spec.channels = codecCtx.channels
+        wanted_spec.silence = 0
+        wanted_spec.samples = SDL_AUDIO_BUFFER_SIZE
+        wanted_spec.callback = audio_callback
+        wanted_spec.userdata = vs
+        
+        if SDL_OpenAudio(&wanted_spec, &spec) < 0:
+            print 'SDL_OpenAudio: %s' % SDL_GetError()
+            return -1
+        
+        vs.audio_hw_buf_size = spec.size
+    
+    codec = avcodec_find_decoder(codecCtx.codec_id)
+    if codec == NULL or avcodec_open(codecCtx, codec) < 0:
+        print 'Unsupported codec!'
+        return -1
+    
+
+    if codecCtx.codec_type == CODEC_TYPE_AUDIO:
+        vs.audioStream = stream_index
+        vs.audio_st = pFormatCtx.streams[stream_index]
+        vs.audio_buf_size = 0
+        vs.audio_buf_index = 0
+        
+        # averaging filter for audio sync
+        vs.audio_diff_avg_coef = exp(log(0.01 / AUDIO_DIFF_AVG_NB))
+        vs.audio_diff_avg_count = 0
+        # Correct audio only if larger error than this
+        vs.audio_diff_threshold = 2.0 * SDL_AUDIO_BUFFER_SIZE / codecCtx.sample_rate
+
+        memset(&vs.audio_pkt, 0, sizeof(vs.audio_pkt))
+        packet_queue_init(&vs.audioq)
+        SDL_PauseAudio(0)
+
+    elif codecCtx.codec_type == CODEC_TYPE_VIDEO:
+        vs.videoStream = stream_index
+        vs.video_st = pFormatCtx.streams[stream_index]
+
+        vs.frame_timer = <double>av_gettime() / 1000000.0
+        vs.frame_last_delay = 40e-3
+        vs.video_current_pts_time = av_gettime()
+
+        packet_queue_init(&vs.videoq)
+        vs.video_tid = SDL_CreateThread(video_thread, vs)
+        codecCtx.get_buffer = our_get_buffer
+        codecCtx.release_buffer = our_release_buffer
+
+cdef int decode_interrupt_cb():
+    if global_video_state != NULL:
+        return global_video_state.quit
+    return 0
+
+cdef int decode_thread(void *arg) with gil:
+    cdef VideoState *vs = <VideoState *>arg
+    cdef AVFormatContext *pFormatCtx = NULL
+    cdef AVPacket pkt1, *packet = &pkt1
+    cdef int video_index = -1
+    cdef int audio_index = -1
+    cdef int i, codec_type
+    cdef int stream_index = -1
+    cdef int64_t seek_target = 0
+    cdef AVRational AV_TIME_BASE_Q
+
+    print 'hello world'
+    from time import sleep
+    sleep(1)
+    print 'sleep done.'
+
+    AV_TIME_BASE_Q.num = 1
+    AV_TIME_BASE_Q.den = 1000000
+
+    vs.videoStream = -1
+    vs.audioStream = -1
+
+    global_video_state = vs
+    # will interrupt blocking functions if we quit!
+    url_set_interrupt_cb(decode_interrupt_cb)
+
+    # Open video file
+    if av_open_input_file(&pFormatCtx, vs.filename, NULL, 0, NULL) != 0:
+        return -1 # Couldn't open file
+
+    vs.pFormatCtx = pFormatCtx
+    
+    # Retrieve stream information
+    if av_find_stream_info(pFormatCtx) < 0:
+        return -1 # Couldn't find stream information
+    
+    # Dump information about file onto standard error
+    dump_format(pFormatCtx, 0, vs.filename, 0)
+    
+    # Find the first video stream
+    for i in xrange(pFormatCtx.nb_streams):
+        codec_type = pFormatCtx.streams[i].codec.codec_type
+        if codec_type == CODEC_TYPE_VIDEO and video_index < 0:
+            video_index = i
+        
+        if codec_type == CODEC_TYPE_AUDIO and audio_index < 0:
+            audio_index = i
+        
+    
+    if audio_index >= 0:
+        stream_component_open(vs, audio_index)
+    
+    if video_index >= 0:
+        stream_component_open(vs, video_index)
+         
+
+    if vs.videoStream < 0 or vs.audioStream < 0:
+        print '%s: could not open codecs' % vs.filename
+        event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
+        return 0
+    
+
+    # main decode loop
+    while True:
+
+        if vs.quit:
+            break
+        
+        # seek stuff goes here
+        if vs.seek_req:
+            stream_index = -1
+            seek_target = vs.seek_pos
+
+            if vs.videoStream >= 0:
+                stream_index = vs.videoStream
+            elif vs.audioStream >= 0:
+                stream_index = vs.audioStream
+
+            if stream_index >= 0:
+
+                seek_target = av_rescale_q(
+                        seek_target, AV_TIME_BASE_Q,
+                        pFormatCtx.streams[stream_index].time_base)
+            
+            if not av_seek_frame(vs.pFormatCtx, stream_index,
+                    seek_target, vs.seek_flags):
+                print '%s: error while seeking' % vs.pFormatCtx.filename
+            else:
+                if vs.audioStream >= 0:
+                    packet_queue_flush(&vs.audioq)
+                    packet_queue_put(&vs.audioq, &flush_pkt)
+                
+                if vs.videoStream >= 0:
+                    packet_queue_flush(&vs.videoq)
+                    packet_queue_put(&vs.videoq, &flush_pkt)
+    
+            vs.seek_req = 0
+        
+        if vs.audioq.size > MAX_AUDIOQ_SIZE or vs.videoq.size > MAX_VIDEOQ_SIZE:
+            with nogil: SDL_Delay(10)
+            continue
+        
+        if av_read_frame(vs.pFormatCtx, packet) < 0:
+            if pFormatCtx.pb.error == 0:
+                with nogil: SDL_Delay(100) # no error wait for user input
+                continue
+            else:
+                break
+            
+        
+        # Is this a packet from the video stream?
+        if packet.stream_index == vs.videoStream:
+            packet_queue_put(&vs.videoq, packet)
+        elif packet.stream_index == vs.audioStream:
+            packet_queue_put(&vs.audioq, packet)
+        else:
+            av_free_packet(packet)
+        
+    # all done - wait for it
+    while vs.quit == 0:
+        with nogil: SDL_Delay(100)
+
+    event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
+    
+    return 0
+
+cdef class ScheduledEvent:
+    cdef Event *event
 
 class FFVideoException(Exception):
     pass
 
 cdef class FFVideo:
-    cdef AVFrame *ff_frame, *ff_frame_rgb
-    cdef AVCodec *ff_video_codec, *ff_audio_codec
-    cdef AVFormatContext *ff_format_ctx
-    cdef AVCodecContext *ff_video_codec_ctx, *ff_audio_codec_ctx
-    cdef SwsContext *ff_sw_ctx
-    cdef int ff_video_stream, ff_audio_stream
-    cdef int ff_data_size
-    cdef unsigned char *ff_data
     cdef unsigned char  *pixels
     cdef bytes filename
-    cdef int is_opened
-    cdef int quit
-    cdef VideoState video_state
+    cdef VideoState *vs
+    cdef list events
 
     def __cinit__(self, filename):
-        self.quit = 0
         self.filename = None
-        self.ff_format_ctx = NULL
-        self.ff_video_stream = -1
-        self.ff_audio_stream = -1
-        self.ff_video_codec = NULL
-        self.ff_audio_codec = NULL
-        self.ff_video_codec_ctx = NULL
-        self.ff_audio_codec_ctx = NULL
-        self.ff_frame = NULL
-        self.ff_frame_rgb = NULL
-        self.ff_data = NULL
-        self.ff_data_size = -1
-        self.ff_sw_ctx = NULL
         self.pixels = NULL
-        self.is_opened = 0
-        memset(&self.video_state, 0, sizeof(self.video_state))
-        self.video_state.audioq.mutex = SDL_CreateMutex()
-        self.video_state.audioq.cond = SDL_CreateCond()
+        self.vs = NULL
+        self.events = []
 
     def __init__(self, filename):
         self.filename = filename
@@ -664,6 +919,7 @@ cdef class FFVideo:
 
     cdef void open(self):
         cdef int i
+        cdef VideoState *vs
         global g_have_register
 
         # ensure that ffmpeg have been registered first
@@ -671,218 +927,77 @@ cdef class FFVideo:
             av_register_all()
             g_have_register = 1
 
-        if av_open_input_file(&self.ff_format_ctx, self.filename, NULL, 0, NULL) != 0:
-            raise FFVideoException('Unable to open input file')
+        # allocate memory for video state
+        self.vs = vs = <VideoState *>av_mallocz(sizeof(VideoState));
+        if vs == NULL:
+            raise FFVideoException('Unable to allocate memory (1)')
 
-        self.is_opened = 1
+        # initialize video state
+        event_queue_init(&vs.eq)
+        memcpy(vs.filename, <char *>self.filename, min(sizeof(vs.filename),
+            len(self.filename)))
+        vs.pictq_mutex = SDL_CreateMutex()
+        vs.pictq_cond = SDL_CreateCond()
+        vs.av_sync_type = DEFAULT_AV_SYNC_TYPE
+        vs.parse_tid = SDL_CreateThread(decode_thread, vs)
+        if vs.parse_tid == NULL:
+            av_free(vs)
 
-        if av_find_stream_info(self.ff_format_ctx) < 0:
-            raise FFVideoException('Unable to find stream info')
-
-        # found at least one video and audio stream
-        for i in xrange(self.ff_format_ctx.nb_streams):
-            if self.ff_format_ctx.streams[i].codec.codec_type == \
-                CODEC_TYPE_VIDEO and self.ff_video_stream < 0:
-                self.ff_video_stream = i
-            if self.ff_format_ctx.streams[i].codec.codec_type == \
-                CODEC_TYPE_AUDIO and self.ff_audio_stream < 0:
-                self.ff_audio_stream = i
-
-        #
-        # video part
-        #
-
-        if self.ff_video_stream == -1:
-            raise FFVideoException('Unable to found video stream')
-
-        self.ff_video_codec_ctx = \
-            self.ff_format_ctx.streams[self.ff_video_stream].codec
-        
-        # find decoder for video stream
-        self.ff_video_codec = avcodec_find_decoder(self.ff_video_codec_ctx.codec_id)
-        if self.ff_video_codec == NULL:
-            raise FFVideoException('Unable to found decoder for video stream')
-
-        # open video codec
-        if avcodec_open(self.ff_video_codec_ctx, self.ff_video_codec) < 0:
-            raise FFVideoException('Unable to open decoder for video stream')
-
-        # alloc frame
-        self.ff_frame = avcodec_alloc_frame()
-        if self.ff_frame == NULL:
-            raise FFVideoException('Unable to allocate codec frame (raw)')
-        self.ff_frame_rgb = avcodec_alloc_frame()
-        if self.ff_frame_rgb == NULL:
-            raise FFVideoException('Unable to allocate codec frame (rgb)')
-
-        # determine required buffer size and allocate
-        self.ff_data_size = avpicture_get_size(PixelFormats.RGB24,
-                self.ff_video_codec_ctx.width, self.ff_video_codec_ctx.height)
-        self.ff_data = <unsigned char *>av_malloc(self.ff_data_size * sizeof(unsigned char))
-
-        # assign appropriate parts of buffer to image planes
-        avpicture_fill(<AVPicture *>self.ff_frame_rgb, self.ff_data, PixelFormats.RGB24,
-                self.ff_video_codec_ctx.width, self.ff_video_codec_ctx.height)
-
-        #
-        # Audio part
-        #
-
-        # don't go further if we don't have audio
-        if self.ff_audio_stream == -1:
-            return
-
-        self.ff_audio_codec_ctx = \
-            self.ff_format_ctx.streams[self.ff_audio_stream].codec
-
-        # find decoder for audio stream
-        self.ff_audio_codec = avcodec_find_decoder(self.ff_audio_codec_ctx.codec_id)
-        if self.ff_audio_codec == NULL:
-            raise FFVideoException('Unable to found decoder for audio stream')
-        print 'Audio codec id:', self.ff_audio_codec_ctx.codec_id
-
-        # open audio codec
-        if avcodec_open(self.ff_audio_codec_ctx, self.ff_audio_codec) < 0:
-            raise FFVideoException('Unable to open decoder for audio stream')
-
-        #
-        # Init audio part
-        #
-        cdef SDL_AudioSpec wanted_spec, spec
-        wanted_spec.freq = self.ff_audio_codec_ctx.sample_rate
-        wanted_spec.format = AUDIO_S16SYS
-        wanted_spec.channels = self.ff_audio_codec_ctx.channels
-        wanted_spec.silence = 0
-        wanted_spec.samples = 1024
-        wanted_spec.callback = audio_callback
-        wanted_spec.userdata = &self.video_state
-
-        if SDL_OpenAudio(&wanted_spec, &spec) < 0:
-            raise FFVideoException('Unable to initialize SDL audio')
-
-        self.video_state.audio_hw_buf_size = spec.size
-
-        SDL_PauseAudio(0)
-            
-
-    cdef int stream_component_open(self, VideoState *vs, int stream_index):
-        cdef AVFormatContext *pFormatCtx = vs.pFormatCtx
-        cdef AVCodecContext *codecCtx
-        cdef AVCodec *codec
-        cdef SDL_AudioSpec wanted_spec, spec
-
-        if stream_index < 0 or stream_index >= pFormatCtx.nb_streams:
-            return -1
-        
-        # Get a pointer to the codec context for the video stream
-        codecCtx = pFormatCtx.streams[stream_index].codec
-
-        if codecCtx.codec_type == CODEC_TYPE_AUDIO:
-            # Set audio settings from codec info
-            wanted_spec.freq = codecCtx.sample_rate
-            wanted_spec.format = AUDIO_S16SYS
-            wanted_spec.channels = codecCtx.channels
-            wanted_spec.silence = 0
-            wanted_spec.samples = SDL_AUDIO_BUFFER_SIZE
-            wanted_spec.callback = audio_callback
-            wanted_spec.userdata = vs
-            
-            if SDL_OpenAudio(&wanted_spec, &spec) < 0:
-                print 'SDL_OpenAudio: %s' % SDL_GetError()
-                return -1
-            
-            vs.audio_hw_buf_size = spec.size
-        
-        codec = avcodec_find_decoder(codecCtx.codec_id)
-        if codec == NULL or avcodec_open(codecCtx, codec) < 0:
-            print 'Unsupported codec!'
-            return -1
-        
-
-        if codecCtx.codec_type == CODEC_TYPE_AUDIO:
-            vs.audioStream = stream_index
-            vs.audio_st = pFormatCtx.streams[stream_index]
-            vs.audio_buf_size = 0
-            vs.audio_buf_index = 0
-            
-            # averaging filter for audio sync
-            vs.audio_diff_avg_coef = exp(log(0.01 / AUDIO_DIFF_AVG_NB))
-            vs.audio_diff_avg_count = 0
-            # Correct audio only if larger error than this
-            vs.audio_diff_threshold = 2.0 * SDL_AUDIO_BUFFER_SIZE / codecCtx.sample_rate
-
-            memset(&vs.audio_pkt, 0, sizeof(vs.audio_pkt))
-            packet_queue_init(&vs.audioq)
-            SDL_PauseAudio(0)
-
-        elif codecCtx.codec_type == CODEC_TYPE_VIDEO:
-            vs.videoStream = stream_index
-            vs.video_st = pFormatCtx.streams[stream_index]
-
-            vs.frame_timer = <double>av_gettime() / 1000000.0
-            vs.frame_last_delay = 40e-3
-            vs.video_current_pts_time = av_gettime()
-
-            packet_queue_init(&vs.videoq)
-            vs.video_tid = SDL_CreateThread(video_thread, vs)
-            codecCtx.get_buffer = our_get_buffer
-            codecCtx.release_buffer = our_release_buffer
-
+        av_init_packet(&flush_pkt)
+        flush_pkt.data = <uint8_t *><char *>'FLUSH'
 
     cdef void update(self):
-        cdef int got_frame
-        cdef AVPacket packet
-        while av_read_frame(self.ff_format_ctx, &packet) >= 0:
+        cdef Event *event
+        cdef int curtime, itime
+        cdef ScheduledEvent se
 
-            got_frame = 0
-
-            # video stream packet ?
-            if packet.stream_index == self.ff_video_stream:
-                # decode video frame
-                avcodec_decode_video2(self.ff_video_codec_ctx, self.ff_frame,
-                        &got_frame, &packet)
-
-                if got_frame:
-
-                    # first time, init swscale context
-                    if self.ff_sw_ctx == NULL:
-                        self.ff_sw_ctx = sws_getContext(
-                            self.ff_video_codec_ctx.width,
-                            self.ff_video_codec_ctx.height,
-                            self.ff_video_codec_ctx.pix_fmt,
-                            self.ff_video_codec_ctx.width,
-                            self.ff_video_codec_ctx.height,
-                            PixelFormats.RGB24, 4, #SWS_BICUBIC
-                            NULL, NULL, NULL)
-                        if self.ff_sw_ctx == NULL:
-                            raise FFVideoException('Unable to initialize conversion context')
-
-                    # convert the image from native to RGB
-                    sws_scale(self.ff_sw_ctx, self.ff_frame.data,
-                            self.ff_frame.linesize, 0,
-                            self.ff_video_codec_ctx.height,
-                            self.ff_frame_rgb.data,
-                            self.ff_frame_rgb.linesize)
-
-            # audio stream packet ?
-            elif packet.stream_index == self.ff_audio_stream:
-                # queue the audio packet
-                packet_queue_put(&self.video_state.audioq, &packet)
+        curtime = time()
+        # check our own events
+        for item in self.events[:]:
+            itime, se = item
+            if curtime < itime:
                 continue
+            self.events.remove(item)
+            print 'xx execute callback, delay was', se.event.delay
+            se.event.callback(se.event.userdata)
+            free(se.event)
 
-            # free the packet
-            av_free_packet(&packet)
-
-            if got_frame:
-                break
+        # read thread event
+        while True:
+            event = event_queue_get(&self.vs.eq)
+            if event == NULL:
+                return
+            print 'execute event', event.name
+            if event.name == FF_ALLOC_EVENT:
+                alloc_picture(event.userdata)
+            elif event.name == FF_REFRESH_EVENT:
+                video_refresh_timer(event.userdata)
+            elif event.name == FF_QUIT_EVENT:
+                self.vs.quit = 1
+                self.stop()
+            elif event.name == FF_SCHEDULE_EVENT:
+                se = ScheduledEvent()
+                se.event = event
+                self.events.append((curtime + event.delay, se))
+                continue # don't free event in that case
+            free(event)
 
     cpdef int get_width(self):
-        return self.ff_video_codec_ctx.width
+        cdef VideoState *vs = self.vs
+        if vs.video_st == NULL or vs.video_st.codec == NULL:
+            return -1
+        return vs.video_st.codec.width
 
     cpdef int get_height(self):
-        return self.ff_video_codec_ctx.height
+        cdef VideoState *vs = self.vs
+        if vs.video_st == NULL or vs.video_st.codec == NULL:
+            return -1
+        return vs.video_st.codec.height
 
     def get_next_frame(self):
+        self.update()
+        print self.get_width(), self.get_height()
+        return
         cdef int size, y, index
         cdef int width = self.get_width()
         cdef int height = self.get_height()
