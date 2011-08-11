@@ -194,6 +194,8 @@ cdef extern from "SDL.h":
     int SDL_PushEvent(SDL_Event *event)
     void SDL_Delay(int) nogil
     int SDL_Init(int)
+    void SDL_LockAudio() nogil
+    void SDL_UnlockAudio() nogil
 
 
 cdef extern from "SDL_mixer.h":
@@ -204,11 +206,11 @@ cdef extern from "SDL_mixer.h":
     void Mix_Pause(int channel)
     void Mix_Resume(int channel)
     void Mix_CloseAudio()
-    int Mix_PlayChannel(int channel, Mix_Chunk *chunk, int loops)
+    int Mix_PlayChannel(int channel, Mix_Chunk *chunk, int loops) nogil
     ctypedef void (*Mix_EffectFunc_t)(int, void *, int, void *)
     ctypedef void (*Mix_EffectDone_t)(int, void *)
-    int Mix_RegisterEffect(int chan, Mix_EffectFunc_t f, Mix_EffectDone_t d, void * arg)
+    int Mix_RegisterEffect(int chan, Mix_EffectFunc_t f, Mix_EffectDone_t d, void * arg) nogil
     int Mix_AllocateChannels(int numchans)
-    Mix_Chunk * Mix_LoadWAV(char *filename)
+    Mix_Chunk * Mix_LoadWAV(char *filename) nogil
 
 
