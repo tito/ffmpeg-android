@@ -24,8 +24,10 @@ TODO:
 include '_ffmpeg.pxi'
 
 from time import time
+from os.path import dirname, join
 
 cdef int g_have_register = 0
+cdef int g_have_register_audio = 0
 cdef AVPacket flush_pkt
 
 cdef struct PacketQueue:
@@ -133,8 +135,43 @@ cdef struct VideoState:
     EventQueue      eq
     SwsContext      *img_convert_ctx
     unsigned char   *pixels
+    Mix_Chunk       *audio_chunk
+    int             audio_channel
+
 
 cdef VideoState *global_video_state = NULL
+
+#
+# Mixer
+# We need a way to mix several raw channels together.
+# The only way was to play an empty sound on each channel, but replace the
+# stream by the sound as a sound effect.
+#
+
+
+DEF MIX_CHANNELS_MAX = 32
+cdef int mix_audio_have_init = 0
+cdef int mix_channels[MIX_CHANNELS_MAX]
+
+cdef int mix_audio_init():
+    global g_have_register_audio
+    if g_have_register_audio == 1:
+        return 0
+    g_have_register_audio = 1
+
+    if SDL_Init(SDL_INIT_AUDIO) < 0:
+        print 'SDL_Init: %s' % SDL_GetError()
+        return -1
+
+    if Mix_OpenAudio(44100, AUDIO_S16SYS, 2, 1024):
+        print 'Mix_OpenAudio: %s' % SDL_GetError()
+        return -1
+
+    memset(mix_channels, 0, sizeof(int) * MIX_CHANNELS_MAX)
+
+    Mix_AllocateChannels(MIX_CHANNELS_MAX)
+
+    return 0
 
 #
 # User event queue, to communicate between thread and python class
@@ -421,7 +458,7 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
     return 0
 
 
-cdef void audio_callback(void *userdata, unsigned char *stream, int l) with gil:
+cdef void audio_callback(int chan, void *stream, int l, void *userdata) with gil:
 
     cdef VideoState *vs = <VideoState *>userdata
     cdef int len1, audio_size
@@ -767,16 +804,47 @@ cdef int stream_component_open(VideoState *vs, int stream_index):
     cdef AVFormatContext *pFormatCtx = vs.pFormatCtx
     cdef AVCodecContext *codecCtx
     cdef AVCodec *codec
-    cdef SDL_AudioSpec wanted_spec, spec
+    #cdef SDL_AudioSpec wanted_spec, spec
 
     if stream_index < 0 or stream_index >= pFormatCtx.nb_streams:
         return -1
     
     # Get a pointer to the codec context for the video stream
     codecCtx = pFormatCtx.streams[stream_index].codec
+    cdef bytes filename
 
     if codecCtx.codec_type == CODEC_TYPE_AUDIO:
+        # Init audio
+        if mix_audio_init() < 0:
+            print 'Unable to init audio'
+            return -1
+
+        # Attach effect to that chunk
+        # search an empty channel
+        vs.audio_channel = -1
+        for i in xrange(MIX_CHANNELS_MAX):
+            if mix_channels[i] == 0:
+                mix_channels[i] = 1
+                vs.audio_channel = i
+                break
+
+        if vs.audio_channel == -1:
+            print 'No more audio channel available'
+            return -1
+
+        # Create Mix Chunk from that entry
+        filename = <bytes>join(dirname(__file__), 'silence.wav')
+        vs.audio_chunk = Mix_LoadWAV(filename)
+        if vs.audio_chunk == NULL:
+            print 'Unable to load chunk'
+            return -1
+
+        if Mix_RegisterEffect(vs.audio_channel, audio_callback, NULL, vs) < 0:
+            print 'Unable to register effect!'
+            return -1
+
         # Set audio settings from codec info
+        '''
         wanted_spec.freq = codecCtx.sample_rate
         wanted_spec.format = AUDIO_S16SYS
         wanted_spec.channels = codecCtx.channels
@@ -784,12 +852,9 @@ cdef int stream_component_open(VideoState *vs, int stream_index):
         wanted_spec.samples = SDL_AUDIO_BUFFER_SIZE
         wanted_spec.callback = audio_callback
         wanted_spec.userdata = vs
+        '''
         
-        if SDL_OpenAudio(&wanted_spec, &spec) < 0:
-            print 'SDL_OpenAudio: %s' % SDL_GetError()
-            return -1
-        
-        vs.audio_hw_buf_size = spec.size
+        vs.audio_hw_buf_size = SDL_AUDIO_BUFFER_SIZE
     
     codec = avcodec_find_decoder(codecCtx.codec_id)
     if codec == NULL or avcodec_open(codecCtx, codec) < 0:
@@ -811,7 +876,8 @@ cdef int stream_component_open(VideoState *vs, int stream_index):
 
         memset(&vs.audio_pkt, 0, sizeof(vs.audio_pkt))
         packet_queue_init(&vs.audioq)
-        SDL_PauseAudio(0)
+
+        Mix_PlayChannel(vs.audio_channel, vs.audio_chunk, -1)
 
     elif codecCtx.codec_type == CODEC_TYPE_VIDEO:
         vs.videoStream = stream_index

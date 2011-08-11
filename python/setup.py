@@ -10,7 +10,7 @@ except ImportError:
     cmdclass = {}
 
 
-libraries = ['avcodec', 'avformat', 'swscale', 'SDL']
+libraries = ['avcodec', 'avformat', 'swscale', 'SDL', 'SDL_mixer']
 library_dirs = []
 include_dirs = []
 extra_objects = []

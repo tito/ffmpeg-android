@@ -6,6 +6,8 @@ ctypedef unsigned int uint32_t
 ctypedef short int16_t
 ctypedef unsigned short uint16_t
 
+DEF SDL_INIT_AUDIO = 0x10
+
 class PixelFormats:
     NONE = -1
     RGB24 = 2
@@ -153,9 +155,6 @@ cdef extern from "SDL.h":
         void (*callback)(void *userdata, uint8_t *stream, int len)
         void *userdata
 
-    int SDL_OpenAudio(SDL_AudioSpec *desired, SDL_AudioSpec *obtained)
-    void SDL_PauseAudio(int pause_on)
-
     struct SDL_mutex:
         pass
 
@@ -194,6 +193,22 @@ cdef extern from "SDL.h":
 
     int SDL_PushEvent(SDL_Event *event)
     void SDL_Delay(int) nogil
+    int SDL_Init(int)
 
+
+cdef extern from "SDL_mixer.h":
+    struct Mix_Chunk:
+        pass
+    int Mix_Init(int)
+    int Mix_OpenAudio(int frequency, uint16_t format, int channels, int chunksize)
+    void Mix_Pause(int channel)
+    void Mix_Resume(int channel)
+    void Mix_CloseAudio()
+    int Mix_PlayChannel(int channel, Mix_Chunk *chunk, int loops)
+    ctypedef void (*Mix_EffectFunc_t)(int, void *, int, void *)
+    ctypedef void (*Mix_EffectDone_t)(int, void *)
+    int Mix_RegisterEffect(int chan, Mix_EffectFunc_t f, Mix_EffectDone_t d, void * arg)
+    int Mix_AllocateChannels(int numchans)
+    Mix_Chunk * Mix_LoadWAV(char *filename)
 
 
