@@ -1146,9 +1146,6 @@ cdef int decode_thread(void *arg) nogil:
         else:
             av_free_packet(packet)
         
-    with gil:
-        print 'all done, wait for it, but why ?'
-
     # all done - wait for it
     cdef int canquit = 0
     while vs.quit == 0:
@@ -1166,11 +1163,15 @@ cdef int decode_thread(void *arg) nogil:
             break
         SDL_Delay(100)
 
-    with gil:
-        print 'ok, we can leave now.'
-
     event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
-    
+
+    vs.audioq.quit = 1
+    vs.videoq.quit = 1
+
+    SDL_LockMutex(vs.pictq_mutex)
+    SDL_CondSignal(vs.pictq_cond)
+    SDL_UnlockMutex(vs.pictq_mutex)
+
     return 0
 
 cdef class ScheduledEvent:
@@ -1231,41 +1232,56 @@ cdef class FFVideo:
         if vs == NULL:
             return
 
+        print 'FFMPEG: free called'
+
         # ensure that nobody will wait on a queue get
         vs.audioq.quit = 1
         vs.videoq.quit = 1
+        print 'FFMPEG: stop audio channels'
+        if vs.audio_channel != -1:
+            Mix_HaltChannel(vs.audio_channel)
+            mix_channels_usage[vs.audio_channel] = 0
+            with nogil:
+                SDL_LockAudio()
+                Mix_UnregisterAllEffects(vs.audio_channel)
+                SDL_UnlockAudio()
 
+        print 'FFMPEG: ask for both thread to leave.'
         if vs.parse_tid != NULL:
+            print 'FFMPEG: we got a thread. how is quit ?'
+            print 'FFMPEG: wait for it.'
             if vs.quit == 0:
-                SDL_WaitThread(vs.parse_tid, NULL)
+                with nogil:
+                    SDL_WaitThread(vs.parse_tid, NULL)
+            print 'FFMPEG: set to null'
             vs.parse_tid = NULL
 
+        print 'FFMPEG: start to free event queue'
         event_queue_clean(&vs.eq)
+        print 'FFMPEG: start to free packet queue'
         packet_queue_clean(&vs.audioq)
         packet_queue_clean(&vs.videoq)
         if vs.pictq_mutex != NULL:
             SDL_DestroyMutex(vs.pictq_mutex)
         if vs.pictq_cond != NULL:
             SDL_DestroyCond(vs.pictq_cond)
-        if vs.audio_channel != -1:
-            mix_channels_usage[vs.audio_channel] = 0
-            with nogil:
-                SDL_LockAudio()
-                Mix_UnregisterAllEffects(vs.audio_channel)
-                SDL_UnlockAudio()
+        print 'FFMPEG: free pixels'
         if vs.pixels != NULL:
             free(vs.pixels)
             vs.pixels = NULL
 
+        print 'FFMPEG: last avfree'
         av_free(vs)
         self.vs = NULL
 
         # flush events
+        print 'FFMPEG: remove scheduled events'
         cdef ScheduledEvent se
         for item in self.events:
             itime, se = item
             free(se.event)
         del self.events[:]
+        print 'FFMPEG: DONE FREE!'
 
     cdef void update(self):
         cdef Event *event
@@ -1298,9 +1314,9 @@ cdef class FFVideo:
                 if self.vs.quit == 0:
                     video_refresh_timer(event.userdata)
             elif event.name == FF_QUIT_EVENT:
-                print 'xxxxxxxxxxxxxxxxxxxxx QUIT EVENT !!!!!!!!!!!!!!!!!!!!!!!!!!', self.filename
                 self.vs.quit = 1
                 self.free()
+                free(event)
                 break
             elif event.name == FF_SCHEDULE_EVENT:
                 se = ScheduledEvent()

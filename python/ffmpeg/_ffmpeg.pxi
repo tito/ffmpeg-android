@@ -210,6 +210,7 @@ cdef extern from "SDL_mixer.h" nogil:
     void Mix_Resume(int channel)
     void Mix_CloseAudio()
     int Mix_PlayChannel(int channel, Mix_Chunk *chunk, int loops)
+    int Mix_HaltChannel(int channel)
     ctypedef void (*Mix_EffectFunc_t)(int, void *, int, void *)
     ctypedef void (*Mix_EffectDone_t)(int, void *)
     int Mix_RegisterEffect(int chan, Mix_EffectFunc_t f, Mix_EffectDone_t d, void * arg)
