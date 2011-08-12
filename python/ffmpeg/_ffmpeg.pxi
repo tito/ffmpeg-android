@@ -7,30 +7,12 @@ ctypedef short int16_t
 ctypedef unsigned short uint16_t
 
 DEF SDL_INIT_AUDIO = 0x10
-
-class PixelFormats:
-    NONE = -1
-    RGB24 = 2
-
-cdef extern from "math.h":
-    double fabs(double)
-    double exp(double)
-    double log(double)
+DEF PF_RGB24 = 2
 
 cdef extern from "Python.h":
-    object PyString_FromStringAndSize(char *s, Py_ssize_t len)
     void PyEval_InitThreads()
 
-cdef extern from "stdlib.h":
-    ctypedef unsigned long size_t
-    void free(void *ptr) 
-    void *malloc(size_t) 
-
-cdef extern from "string.h":
-    void *memcpy(void *dest, void *src, size_t n) 
-    void *memset(void *s, int c, size_t n) 
-
-cdef extern from "libavcodec/avcodec.h":
+cdef extern from "libavcodec/avcodec.h" nogil:
     enum CodecType:
         CODEC_TYPE_UNKNOWN = -1
         CODEC_TYPE_VIDEO = 0
@@ -83,8 +65,8 @@ cdef extern from "libavcodec/avcodec.h":
     int avcodec_decode_audio2(AVCodecContext *avctx, int16_t *samples,
                         int *frame_size_ptr, uint8_t *buf, int buf_size)
     int avcodec_close(AVCodecContext *avctx) 
-    void av_free_packet(AVPacket *pkt) 
-    int av_dup_packet(AVPacket *pkt) 
+    void av_free_packet(AVPacket *pkt) nogil
+    int av_dup_packet(AVPacket *pkt) nogil
     void avcodec_flush_buffers(AVCodecContext *avctx)
     void av_init_packet(AVPacket *pkt)
 
@@ -102,7 +84,7 @@ cdef extern from "libavcodec/avcodec.h":
     ReSampleContext *av_audio_resample_init(int, int, int, int, int, int, int, int, int, double)
     void audio_resample_close(ReSampleContext *)
 
-cdef extern from "libavformat/avformat.h":
+cdef extern from "libavformat/avformat.h" nogil:
     struct AVStream:
         AVCodecContext *codec
         AVRational time_base
@@ -127,10 +109,10 @@ cdef extern from "libavformat/avformat.h":
     int av_read_frame(AVFormatContext *s, AVPacket *pkt) 
     void av_close_input_file(AVFormatContext *s) 
 
-    void *av_malloc(unsigned int size) 
-    void *av_mallocz(unsigned int size) 
-    void av_free(void *ptr) 
-    void av_freep(void *ptr)
+    void *av_malloc(unsigned int size) nogil
+    void *av_mallocz(unsigned int size) nogil
+    void av_free(void *ptr)  nogil
+    void av_freep(void *ptr) nogil
     int64_t av_gettime()
     void dump_format(AVFormatContext *ic, int index,
             char *url, int is_output) 
@@ -138,7 +120,7 @@ cdef extern from "libavformat/avformat.h":
     void url_set_interrupt_cb(URLInterruptCB)
     int av_seek_frame(AVFormatContext *s, int stream_index, int64_t timestamp, int flags)
 
-cdef extern from "libswscale/swscale.h":
+cdef extern from "libswscale/swscale.h" nogil:
     struct SwsContext:
         pass
     struct SwsFilter:
@@ -150,10 +132,10 @@ cdef extern from "libswscale/swscale.h":
             int dstW, int dstH, int dstFormat, int flags,
             SwsFilter *srcFilter, SwsFilter *dstFilter, double *param) 
 
-cdef extern from "libavutil/avutil.h":
+cdef extern from "libavutil/avutil.h" nogil:
     int64_t av_rescale_q(int64_t a, AVRational bq, AVRational cq)
 
-cdef extern from "SDL.h":
+cdef extern from "SDL.h" nogil:
     struct SDL_AudioSpec:
         int freq
         uint16_t format
@@ -171,24 +153,24 @@ cdef extern from "SDL.h":
     struct SDL_Thread:
         pass
 
-    SDL_mutex *SDL_CreateMutex() 
+    SDL_mutex *SDL_CreateMutex()
     void SDL_DestroyMutex(SDL_mutex *)
-    int SDL_LockMutex(SDL_mutex *) nogil
-    int SDL_UnlockMutex(SDL_mutex *) nogil
+    int SDL_LockMutex(SDL_mutex *)
+    int SDL_UnlockMutex(SDL_mutex *)
 
     struct SDL_cond:
         pass
 
     SDL_cond *SDL_CreateCond()
-    void SDL_DestroyCond(SDL_cond *) 
-    int SDL_CondSignal(SDL_cond *) nogil
-    int SDL_CondWait(SDL_cond *, SDL_mutex *) nogil
+    void SDL_DestroyCond(SDL_cond *)
+    int SDL_CondSignal(SDL_cond *)
+    int SDL_CondWait(SDL_cond *, SDL_mutex *)
 
     struct SDL_Thread:
         pass
 
     ctypedef int (*SDLCALL)(void *)
-    SDL_Thread *SDL_CreateThread(SDLCALL, void *data) nogil
+    SDL_Thread *SDL_CreateThread(SDLCALL, void *data)
     void SDL_WaitThread(SDL_Thread *thread, int *status)
 
     char *SDL_GetError()
@@ -203,12 +185,12 @@ cdef extern from "SDL.h":
         uint8_t type
 
     int SDL_PushEvent(SDL_Event *event)
-    void SDL_Delay(int) nogil
+    void SDL_Delay(int)
     int SDL_Init(int)
-    void SDL_LockAudio() nogil
-    void SDL_UnlockAudio() nogil
+    void SDL_LockAudio()
+    void SDL_UnlockAudio()
 
-cdef extern from "SDL_mixer.h":
+cdef extern from "SDL_mixer.h" nogil:
     struct Mix_Chunk:
         pass
     int Mix_Init(int)
@@ -216,12 +198,12 @@ cdef extern from "SDL_mixer.h":
     void Mix_Pause(int channel)
     void Mix_Resume(int channel)
     void Mix_CloseAudio()
-    int Mix_PlayChannel(int channel, Mix_Chunk *chunk, int loops) nogil
+    int Mix_PlayChannel(int channel, Mix_Chunk *chunk, int loops)
     ctypedef void (*Mix_EffectFunc_t)(int, void *, int, void *)
     ctypedef void (*Mix_EffectDone_t)(int, void *)
-    int Mix_RegisterEffect(int chan, Mix_EffectFunc_t f, Mix_EffectDone_t d, void * arg) nogil
-    int Mix_UnregisterAllEffects(int chan) nogil
+    int Mix_RegisterEffect(int chan, Mix_EffectFunc_t f, Mix_EffectDone_t d, void * arg)
+    int Mix_UnregisterAllEffects(int chan)
     int Mix_AllocateChannels(int numchans)
-    Mix_Chunk * Mix_LoadWAV(char *filename) nogil
+    Mix_Chunk * Mix_LoadWAV(char *filename)
     int Mix_QuerySpec(int *frequency,uint16_t *format,int *channels)
 
