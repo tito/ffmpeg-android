@@ -183,6 +183,7 @@ cdef extern from "SDL.h" nogil:
     ctypedef int (*SDLCALL)(void *)
     SDL_Thread *SDL_CreateThread(SDLCALL, void *data)
     void SDL_WaitThread(SDL_Thread *thread, int *status)
+    uint32_t SDL_ThreadID()
 
     char *SDL_GetError()
 

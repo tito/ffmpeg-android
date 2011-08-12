@@ -242,6 +242,9 @@ cdef void ffmpeg_ensure_init():
     # add mutex management
     av_lockmgr_register(ffmpeg_mutex_mgr)
 
+    # Init audio
+    mix_audio_init()
+
 
 #
 # User event queue, to communicate between thread and python class
@@ -902,7 +905,10 @@ cdef int video_thread(void *arg) nogil:
             
         av_free_packet(packet)
     
+    cdef int tid
     with gil:
+        tid = <unsigned int>SDL_ThreadID()
+        print 'FFMPEG: in video_thread', tid
         print 'video_thread() leaved'
     av_free(pFrame)
     return 0
@@ -923,11 +929,6 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
     cdef bytes filename
 
     if codecCtx.codec_type == CODEC_TYPE_AUDIO:
-        # Init audio
-        if mix_audio_init() < 0:
-            print 'Unable to init audio'
-            return -1
-
         # Attach effect to that chunk
         # search an empty channel
         vs.audio_channel = -1
@@ -1159,18 +1160,33 @@ cdef int decode_thread(void *arg) nogil:
             canquit += 1
         SDL_UnlockMutex(vs.videoq.mutex)
         if canquit == 2:
-            vs.quit = 1
             break
         SDL_Delay(100)
 
     event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
 
+    with gil:
+        print 'FFMPEG: SET EVERYTHING TO QUIT'
+        print 'FFMPEG: in decode_thread', SDL_ThreadID()
+    vs.quit = 1
     vs.audioq.quit = 1
     vs.videoq.quit = 1
 
+    # unlock queue and video in case of.
+    SDL_LockMutex(vs.videoq.mutex)
+    SDL_CondSignal(vs.videoq.cond)
+    SDL_UnlockMutex(vs.videoq.mutex)
     SDL_LockMutex(vs.pictq_mutex)
     SDL_CondSignal(vs.pictq_cond)
     SDL_UnlockMutex(vs.pictq_mutex)
+
+    with gil:
+        print 'FFMPEG: LEAVE HIM ALONE'
+    if vs.video_tid != NULL:
+        SDL_WaitThread(vs.video_tid, NULL)
+        vs.video_tid = NULL
+    with gil:
+        print 'FFMPEG: KILL WAIT THREAD DONE.'
 
     return 0
 
@@ -1232,6 +1248,7 @@ cdef class FFVideo:
         if vs == NULL:
             return
 
+        print 'FFMPEG: in FFVideo.free()', SDL_ThreadID()
         print 'FFMPEG: free called'
 
         # ensure that nobody will wait on a queue get
@@ -1250,9 +1267,8 @@ cdef class FFVideo:
         if vs.parse_tid != NULL:
             print 'FFMPEG: we got a thread. how is quit ?'
             print 'FFMPEG: wait for it.'
-            if vs.quit == 0:
-                with nogil:
-                    SDL_WaitThread(vs.parse_tid, NULL)
+            with nogil:
+                SDL_WaitThread(vs.parse_tid, NULL)
             print 'FFMPEG: set to null'
             vs.parse_tid = NULL
 
