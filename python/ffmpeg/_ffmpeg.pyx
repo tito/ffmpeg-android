@@ -92,6 +92,7 @@ cdef struct EventQueue:
     SDL_mutex *mutex
 
 cdef struct VideoState:
+    uint8_t         audio_buf[(AVCODEC_MAX_AUDIO_FRAME_SIZE * 3) / 2]
     AVFormatContext *pFormatCtx
     int             videoStream
     int             audioStream
@@ -105,7 +106,6 @@ cdef struct VideoState:
     double          audio_clock
     AVStream        *audio_st
     PacketQueue     audioq
-    uint8_t         audio_buf[(AVCODEC_MAX_AUDIO_FRAME_SIZE * 3) / 2]
     unsigned int    audio_buf_size
     unsigned int    audio_buf_index
     AVPacket        audio_pkt
@@ -1230,11 +1230,10 @@ cdef class FFVideo:
         vs.audioq.quit = 1
         vs.videoq.quit = 1
 
-        print 'wait for thread...'
         if vs.parse_tid != NULL:
-            SDL_WaitThread(vs.parse_tid, NULL)
+            if vs.quit == 0:
+                SDL_WaitThread(vs.parse_tid, NULL)
             vs.parse_tid = NULL
-        print 'thread finished !'
 
         event_queue_clean(&vs.eq)
         packet_queue_clean(&vs.audioq)

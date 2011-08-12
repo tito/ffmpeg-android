@@ -22,10 +22,11 @@ if not have_cython:
     ext_files = [x.replace('.pyx', '.c') for x in ext_files]
     include_dirs = [
         '../build/ffmpeg/armeabi-v7a/include/',
-        '/home/tito/code/pgs4a-kivy/jni/sdl/include'
+        '/home/tito/code/pgs4a-kivy/jni/sdl/include',
+        '/home/tito/code/pgs4a-kivy/jni/sdl_mixer'
     ]
     p = realpath('../ffmpeg/')
-    libraries = ['gcc', 'z', 'sdl']
+    libraries = ['gcc', 'z', 'sdl', 'sdl_mixer']
     extra_objects = [
         join(p, 'libavcodec', 'libavcodec.a'),
         join(p, 'libavformat', 'libavformat.a'),
@@ -47,7 +48,7 @@ ext = Extension(
     library_dirs=library_dirs,
     libraries=libraries,
     extra_objects=extra_objects,
-    extra_compile_args=extra_compile_args
+    extra_compile_args=extra_compile_args,
 )
 
 setup(
@@ -62,4 +63,5 @@ setup(
     cmdclass=cmdclass,
     packages=['ffmpeg'],
     package_dir={'ffmpeg': 'ffmpeg'},
+    package_data={'ffmpeg': ['*.wav']}
 )
