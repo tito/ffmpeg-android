@@ -166,6 +166,7 @@ cdef inline double dmax(double a, double b) nogil:
     return a if a > b else b
 
 cdef VideoState *global_video_state = NULL
+cdef SDL_mutex *g_ffmpeg_mutex = NULL
 
 #
 # Mixer
@@ -210,6 +211,38 @@ cdef int mix_audio_init():
 
     return 0
 
+cdef int ffmpeg_mutex_mgr(void **_mutex, AVLockOp op) nogil:
+    cdef SDL_mutex *mutex = <SDL_mutex *>_mutex[0]
+    if op == AV_LOCK_CREATE:
+        mutex = <SDL_mutex *>SDL_CreateMutex()
+        _mutex[0] = <void *>mutex
+    elif op == AV_LOCK_OBTAIN:
+        SDL_LockMutex(mutex)
+    elif op == AV_LOCK_RELEASE:
+        SDL_UnlockMutex(mutex)
+    elif op == AV_LOCK_DESTROY:
+        SDL_DestroyMutex(mutex)
+        _mutex[0] = NULL
+    else:
+        return -1
+    return 0
+
+
+cdef void ffmpeg_ensure_init():
+    # ensure that ffmpeg have been registered first
+    global g_have_register
+    if g_have_register == 1:
+        return
+
+    g_have_register = 1
+
+    PyEval_InitThreads()
+    av_register_all()
+
+    # add mutex management
+    av_lockmgr_register(ffmpeg_mutex_mgr)
+
+
 #
 # User event queue, to communicate between thread and python class
 # No python used, to be able at some time to remove GIL usage.
@@ -225,15 +258,13 @@ cdef Event *event_create() nogil:
     return event
 
 cdef void event_queue_put(EventQueue *q, Event *e) nogil:
-    with nogil:
-        SDL_LockMutex(q.mutex)
+    SDL_LockMutex(q.mutex)
     if q.last != NULL:
         q.last.next = e
     q.last = e
     if q.first == NULL:
         q.first = e
-    with nogil:
-        SDL_UnlockMutex(q.mutex)
+    SDL_UnlockMutex(q.mutex)
 
 cdef void event_queue_put_fast(EventQueue *q, int name, void *userdata) nogil:
     cdef Event *e = event_create()
@@ -714,7 +745,7 @@ cdef void alloc_picture(void *userdata) nogil:
     SDL_CondSignal(vs.pictq_cond)
     SDL_UnlockMutex(vs.pictq_mutex)
 
-cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
+cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts) nogil:
     cdef VideoPicture *vp
     cdef int dst_pix_fmt
     cdef AVPicture pict
@@ -723,15 +754,11 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
     #print 'queue_picture()', vs.pictq_size
 
     # wait until we have space for a new pic
-    with nogil:
-        SDL_LockMutex(vs.pictq_mutex)
+    SDL_LockMutex(vs.pictq_mutex)
     #print 'queue_picture() after lock'
     while vs.pictq_size >= VIDEO_PICTURE_QUEUE_SIZE and not vs.quit:
-        with nogil:
-            SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
-    
-    with nogil:
-        SDL_UnlockMutex(vs.pictq_mutex)
+        SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
+    SDL_UnlockMutex(vs.pictq_mutex)
 
     if vs.quit:
         return -1
@@ -749,14 +776,11 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
         event_queue_put_fast(&vs.eq, FF_ALLOC_EVENT, vs)
 
         # wait until we have a picture allocated 
-        with nogil:
-            SDL_LockMutex(vs.pictq_mutex)
+        SDL_LockMutex(vs.pictq_mutex)
         while not vp.allocated and not vs.quit:
-            with nogil:
-                SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
-        
-        with nogil:
-            SDL_UnlockMutex(vs.pictq_mutex)
+            SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
+        SDL_UnlockMutex(vs.pictq_mutex)
+
         if vs.quit:
             return -1
         
@@ -779,7 +803,8 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
                     vs.video_st.codec.pix_fmt, w, h, 
                     dst_pix_fmt, 4, NULL, NULL, NULL)
             if vs.img_convert_ctx == NULL:
-                print 'Cannot initialize the conversion context!'
+                with gil:
+                    print 'Cannot initialize the conversion context!'
                 return -1
         
         sws_scale(vs.img_convert_ctx, pFrame.data, pFrame.linesize,
@@ -792,11 +817,9 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts):
         if vs.pictq_windex == VIDEO_PICTURE_QUEUE_SIZE:
             vs.pictq_windex = 0
         
-        with nogil:
-            SDL_LockMutex(vs.pictq_mutex)
+        SDL_LockMutex(vs.pictq_mutex)
         vs.pictq_size += 1
-        with nogil:
-            SDL_UnlockMutex(vs.pictq_mutex)
+        SDL_UnlockMutex(vs.pictq_mutex)
     
     return 0
         
@@ -830,7 +853,7 @@ cdef void our_release_buffer(AVCodecContext *c, AVFrame *pic) nogil:
     avcodec_default_release_buffer(c, pic)
         
 
-cdef int video_thread(void *arg) with gil:
+cdef int video_thread(void *arg) nogil:
     cdef VideoState *vs = <VideoState *>arg
     cdef AVPacket pkt1, *packet = &pkt1
     cdef int len1, frameFinished = 0
@@ -839,7 +862,8 @@ cdef int video_thread(void *arg) with gil:
 
     pFrame = avcodec_alloc_frame()
 
-    print 'video_thread() started'
+    with gil:
+        print 'video_thread() started'
 
     while True:
         if packet_queue_get(&vs.videoq, packet, 1) < 0:
@@ -855,8 +879,9 @@ cdef int video_thread(void *arg) with gil:
         # Save global pts to be stored in pFrame
         global_video_pkt_pts = packet.pts
         # Decode video frame
-        len1 = avcodec_decode_video2(
-                vs.video_st.codec, pFrame, &frameFinished, packet)
+        with gil:
+            len1 = avcodec_decode_video2(
+                    vs.video_st.codec, pFrame, &frameFinished, packet)
         if packet.dts == AV_NOPTS_VALUE and pFrame.opaque:
             memcpy(&ptst, pFrame.opaque, sizeof(uint64_t))
             if ptst != AV_NOPTS_VALUE:
@@ -877,12 +902,13 @@ cdef int video_thread(void *arg) with gil:
             
         av_free_packet(packet)
     
-    print 'video_thread() leaved'
+    with gil:
+        print 'video_thread() leaved'
     av_free(pFrame)
     return 0
 
 @cython.cdivision(True)
-cdef int stream_component_open(VideoState *vs, int stream_index):
+cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
     cdef AVFormatContext *pFormatCtx = vs.pFormatCtx
     cdef AVCodecContext *codecCtx
     cdef AVCodec *codec
@@ -959,7 +985,6 @@ cdef int stream_component_open(VideoState *vs, int stream_index):
     if codec == NULL or avcodec_open(codecCtx, codec) < 0:
         print 'Unsupported codec!'
         return -1
-    
 
     if codecCtx.codec_type == CODEC_TYPE_AUDIO:
         vs.audioStream = stream_index
@@ -997,7 +1022,7 @@ cdef int decode_interrupt_cb() nogil:
         return global_video_state.quit
     return 0
 
-cdef int decode_thread(void *arg) with gil:
+cdef int decode_thread(void *arg) nogil:
     cdef VideoState *vs = <VideoState *>arg
     cdef AVFormatContext *pFormatCtx = NULL
     cdef AVPacket pkt1, *packet = &pkt1
@@ -1040,22 +1065,23 @@ cdef int decode_thread(void *arg) with gil:
         if codec_type == CODEC_TYPE_AUDIO and audio_index < 0:
             audio_index = i
         
-    if audio_index >= 0:
-        stream_component_open(vs, audio_index)
-    
-    if video_index >= 0:
-        stream_component_open(vs, video_index)
+    with gil:
+        if audio_index >= 0:
+            stream_component_open(vs, audio_index)
+        
+        if video_index >= 0:
+            stream_component_open(vs, video_index)
          
 
-    if vs.videoStream < 0 or vs.audioStream < 0:
-        print '%s: could not open codecs' % vs.filename
-        if vs.audioStream < 0:
-            print '%s: cannot open for audio' % vs.filename
-        if vs.videoStream < 0:
-            print '%s: cannot open for video' % vs.filename
-        if vs.videoStream < 0:
-            event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
-            return 0
+        if vs.videoStream < 0 or vs.audioStream < 0:
+            if vs.audioStream < 0 and audio_index >= 0:
+                print '%s: could not open codecs for audio' % vs.filename
+            if vs.videoStream < 0 and video_index >= 0:
+                print '%s: could not open codecs for video' % vs.filename
+            if vs.videoStream < 0:
+                print 'LEAVE EVERYTHING!'
+                event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
+                return 0
     
 
     # main decode loop
@@ -1096,11 +1122,12 @@ cdef int decode_thread(void *arg) with gil:
             vs.seek_req = 0
         
         if vs.audioq.size > MAX_AUDIOQ_SIZE or vs.videoq.size > MAX_VIDEOQ_SIZE:
-            with nogil: SDL_Delay(10)
+            SDL_Delay(10)
             continue
         
         if av_read_frame(vs.pFormatCtx, packet) < 0:
-            print 'av_read_frame() return bleh', pFormatCtx.pb.error
+            with gil:
+                print 'av_read_frame() return bleh', pFormatCtx.pb.error
             break
             '''
             if pFormatCtx.pb.error == 0:
@@ -1119,27 +1146,28 @@ cdef int decode_thread(void *arg) with gil:
         else:
             av_free_packet(packet)
         
-    print 'all done, wait for it, but why ?'
+    with gil:
+        print 'all done, wait for it, but why ?'
 
     # all done - wait for it
     cdef int canquit = 0
     while vs.quit == 0:
         canquit = 0
-        with nogil:
-            SDL_LockMutex(vs.audioq.mutex)
-            if vs.audioq.nb_packets == 0:
-                canquit += 1
-            SDL_UnlockMutex(vs.audioq.mutex)
-            SDL_LockMutex(vs.videoq.mutex)
-            if vs.videoq.nb_packets == 0:
-                canquit += 1
-            SDL_UnlockMutex(vs.videoq.mutex)
+        SDL_LockMutex(vs.audioq.mutex)
+        if vs.audioq.nb_packets == 0:
+            canquit += 1
+        SDL_UnlockMutex(vs.audioq.mutex)
+        SDL_LockMutex(vs.videoq.mutex)
+        if vs.videoq.nb_packets == 0:
+            canquit += 1
+        SDL_UnlockMutex(vs.videoq.mutex)
         if canquit == 2:
             vs.quit = 1
             break
-        with nogil: SDL_Delay(100)
+        SDL_Delay(100)
 
-    print 'ok, we can leave now.'
+    with gil:
+        print 'ok, we can leave now.'
 
     event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
     
@@ -1171,13 +1199,8 @@ cdef class FFVideo:
     def open(self):
         cdef int i
         cdef VideoState *vs
-        global g_have_register
 
-        # ensure that ffmpeg have been registered first
-        if g_have_register == 0:
-            PyEval_InitThreads()
-            av_register_all()
-            g_have_register = 1
+        ffmpeg_ensure_init()
 
         # allocate memory for video state
         self.vs = vs = <VideoState *>av_mallocz(sizeof(VideoState));

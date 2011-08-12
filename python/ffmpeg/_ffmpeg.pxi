@@ -58,13 +58,23 @@ cdef extern from "libavcodec/avcodec.h" nogil:
         
     void av_register_all() 
     AVCodec *avcodec_find_decoder(int cid) 
-    int avcodec_open(AVCodecContext *avctx, AVCodec *codec) 
+
+    int avcodec_open(AVCodecContext *avctx, AVCodec *codec)
+    int avcodec_close(AVCodecContext *avctx)
+
+    enum AVLockOp:
+        AV_LOCK_CREATE
+        AV_LOCK_OBTAIN
+        AV_LOCK_RELEASE
+        AV_LOCK_DESTROY
+    ctypedef int (*lockmgr_t)(void **mutex, AVLockOp op)
+    int av_lockmgr_register(lockmgr_t cb)
+
     AVFrame *avcodec_alloc_frame() 
     int avcodec_decode_video2(AVCodecContext *avctx, AVFrame *picture,
                          int *got_picture_ptr, AVPacket *avpkt)
     int avcodec_decode_audio2(AVCodecContext *avctx, int16_t *samples,
                         int *frame_size_ptr, uint8_t *buf, int buf_size)
-    int avcodec_close(AVCodecContext *avctx) 
     void av_free_packet(AVPacket *pkt) nogil
     int av_dup_packet(AVPacket *pkt) nogil
     void avcodec_flush_buffers(AVCodecContext *avctx)
@@ -103,8 +113,9 @@ cdef extern from "libavformat/avformat.h" nogil:
         AVPacket pkt
         AVPacketList *next
 
+    # cannot work in threads mode, use GIL to act as a mutex
     int av_open_input_file(AVFormatContext **ic, char *filename,
-            AVInputFormat *fmt, int buf_size, AVFormatParameters *ap) 
+            AVInputFormat *fmt, int buf_size, AVFormatParameters *ap) with gil
     int av_find_stream_info(AVFormatContext *ic) 
     int av_read_frame(AVFormatContext *s, AVPacket *pkt) 
     void av_close_input_file(AVFormatContext *s) 
