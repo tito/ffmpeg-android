@@ -844,8 +844,7 @@ cdef int our_get_buffer(AVCodecContext *c, AVFrame *pic):
 
 
 cdef void our_release_buffer(AVCodecContext *c, AVFrame *pic):
-    # XXX FIXME!
-    #if pic != NULL: av_freep(pic.opaque)
+    if pic != NULL: av_freep(&pic.opaque)
     avcodec_default_release_buffer(c, pic)
         
 
