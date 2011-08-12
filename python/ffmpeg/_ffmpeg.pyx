@@ -37,6 +37,7 @@ cdef struct PacketQueue:
     int size
     SDL_mutex *mutex
     SDL_cond *cond
+    int quit
 
 cdef struct VideoPicture:
     int width
@@ -137,7 +138,21 @@ cdef struct VideoState:
     unsigned char   *pixels
     Mix_Chunk       *audio_chunk
     int             audio_channel
+    ReSampleContext *audio_resample_ctx
+    uint8_t         *audio_buf_rs
 
+cdef int get_bits_per_sample_fmt(int fmt):
+    if fmt == 0: #U8
+        return 8
+    elif fmt == 1: #U16
+        return 16
+    elif fmt == 2: #U32
+        return 32
+    elif fmt == 3: #FLOAT
+        return sizeof(float)
+    elif fmt == 4: #DOUBLE
+        return sizeof(double)
+    return -1
 
 cdef VideoState *global_video_state = NULL
 
@@ -150,11 +165,14 @@ cdef VideoState *global_video_state = NULL
 
 
 DEF MIX_CHANNELS_MAX = 32
+cdef int mix_rate = 44100
+cdef int mix_channels = 2
 cdef int mix_audio_have_init = 0
-cdef int mix_channels[MIX_CHANNELS_MAX]
+cdef int mix_channels_usage[MIX_CHANNELS_MAX]
 
 cdef int mix_audio_init():
     global g_have_register_audio
+    global mix_rate, mix_channels
     if g_have_register_audio == 1:
         return 0
     g_have_register_audio = 1
@@ -163,13 +181,21 @@ cdef int mix_audio_init():
         print 'SDL_Init: %s' % SDL_GetError()
         return -1
 
-    if Mix_OpenAudio(44100, AUDIO_S16SYS, 2, 1024):
+    if Mix_OpenAudio(mix_rate, AUDIO_S16SYS, mix_channels, 1024):
         print 'Mix_OpenAudio: %s' % SDL_GetError()
         return -1
 
-    memset(mix_channels, 0, sizeof(int) * MIX_CHANNELS_MAX)
+    memset(mix_channels_usage, 0, sizeof(int) * MIX_CHANNELS_MAX)
+
+    SDL_LockAudio()
+
+    print 'Audio ask for', mix_rate, mix_channels
+    Mix_QuerySpec(&mix_rate, NULL, &mix_channels)
+    print 'Audio ask got', mix_rate, mix_channels
 
     Mix_AllocateChannels(MIX_CHANNELS_MAX)
+
+    SDL_UnlockAudio()
 
     return 0
 
@@ -217,6 +243,21 @@ cdef Event *event_queue_get(EventQueue *q):
         SDL_UnlockMutex(q.mutex)
     return e
 
+cdef void event_queue_clean(EventQueue *q):
+    cdef Event *e, *e2
+    with nogil:
+        SDL_LockMutex(q.mutex)
+    e = q.first
+    while e != NULL:
+        q.first = q.first.next
+        free(e)
+        e = q.first
+    with nogil:
+        SDL_UnlockMutex(q.mutex)
+    SDL_DestroyMutex(q.mutex)
+
+
+
 #
 # Packet Queue
 #
@@ -226,6 +267,25 @@ cdef void packet_queue_init(PacketQueue *q):
     q.mutex = SDL_CreateMutex()
     q.cond = SDL_CreateCond()
 
+cdef void packet_queue_clean(PacketQueue *q):
+    q.quit = 1
+    packet_queue_flush(q)
+    print 'clean queue XXX ENTER'
+    with nogil:
+        SDL_LockMutex(q.mutex)
+        SDL_CondSignal(q.cond) 
+        SDL_UnlockMutex(q.mutex)
+        SDL_Delay(10)
+    with nogil:
+        SDL_LockMutex(q.mutex)
+        SDL_UnlockMutex(q.mutex)
+    print 'clean queue XXX AFTER MUTEX'
+    if q.mutex != NULL:
+        SDL_DestroyMutex(q.mutex)
+        q.mutex = NULL
+    if q.cond != NULL:
+        SDL_DestroyCond(q.cond)
+        q.cond = NULL
 
 cdef int packet_queue_put(PacketQueue *q, AVPacket *pkt):
     cdef AVPacketList *pkt1
@@ -267,10 +327,9 @@ cdef int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block):
 
     while True:
 
-        # FIXME!!
-        #if ctx.quit:
-        #    ret = -1
-        #    break
+        if q.quit:
+            ret = -1
+            break
 
         pkt1 = q.first_pkt
         if pkt1 != NULL:
@@ -287,8 +346,10 @@ cdef int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block):
             ret = 0
             break
         else:
+            print '>>> START WAIT'
             with nogil:
                 SDL_CondWait(q.cond, q.mutex)
+            print '<<< END WAIT'
 
     with nogil:
         SDL_UnlockMutex(q.mutex)
@@ -415,6 +476,7 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
 
             data_size = buf_size
 
+            print 'start avcode decode audio', data_size
             len1 = avcodec_decode_audio2(
                     vs.audio_st.codec, <int16_t *>vs.audio_buf, &data_size, 
                     vs.audio_pkt_data, vs.audio_pkt_size)
@@ -440,9 +502,8 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
         if pkt.data:
             av_free_packet(pkt)
 
-        # FIXME
-        # if ctx.quit:
-        #    return -1
+        if vs.quit:
+           return -1
 
         if packet_queue_get(&vs.audioq, pkt, 0) < 0:
             return -1
@@ -462,15 +523,30 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
 cdef void audio_callback(int chan, void *stream, int l, void *userdata) with gil:
 
     cdef VideoState *vs = <VideoState *>userdata
-    cdef int len1, audio_size
+    cdef int len1, audio_size, l1 = l
     cdef double pts = 0
+
+    if vs.quit == 1:
+        return
+
+    cdef int consumed = 0, written = 0
+    cdef int s
+    print '>>> enter audio callback'
 
     while l > 0:
 
+        print 'audio_callback() again, need to fill', l
+        print '  index is', vs.audio_buf_index
+        print '  size is', vs.audio_buf_size
+
         if vs.audio_buf_index >= vs.audio_buf_size:
+            print '======== ASK FOR FRAME'
             # We have already sent all our data; get more
             audio_size = audio_decode_frame(vs, vs.audio_buf,
                     sizeof(vs.audio_buf), &pts)
+            print 'audio decode frame', vs.quit
+            if vs.quit == 1:
+                return
             if audio_size < 0:
                 # If error, output silence
                 vs.audio_buf_size = 1024
@@ -480,14 +556,44 @@ cdef void audio_callback(int chan, void *stream, int l, void *userdata) with gil
                         audio_size, pts)
                 vs.audio_buf_size = audio_size
             vs.audio_buf_index = 0
+            print 'audio decode frame got packet of', vs.audio_buf_size
+
+            # resample it
+            if vs.audio_resample_ctx != NULL:
+
+                if vs.audio_buf_rs == NULL:
+                    s = int(min(1, (float(mix_rate) /
+                        float(vs.audio_st.codec.sample_rate)))) * sizeof(vs.audio_buf)
+                    print 'first time, allocation', s
+                    vs.audio_buf_rs = <uint8_t *>av_malloc(int(s))
+                print 'resample start', {'size': vs.audio_buf_size, 'index': vs.audio_buf_index}
+                isize = get_bits_per_sample_fmt(vs.audio_st.codec.sample_fmt) / 8
+                isample = vs.audio_buf_size / (vs.audio_st.codec.channels * isize)
+                osize = get_bits_per_sample_fmt(1) / 8 # 1 = AV_SAMPLE_FMT_S16
+                print 'resample info', {'isize': isize, 'osize': osize,
+                        'isample': isample, 'sample_fmt':
+                        vs.audio_st.codec.sample_fmt, 'ichannels':
+                        vs.audio_st.codec.channels}
+                size_out = audio_resample(vs.audio_resample_ctx, <int16_t *>vs.audio_buf_rs, <int16_t*>vs.audio_buf, isample)
+                vs.audio_buf_size = size_out * mix_channels * osize
+                print 'resample done', vs.audio_buf_size
 
         len1 = vs.audio_buf_size - vs.audio_buf_index
         if len1 > l:
             len1 = l
-        memcpy(stream, <uint8_t *>vs.audio_buf + vs.audio_buf_index, len1)
+        if vs.audio_resample_ctx != NULL:
+            memcpy(stream, <uint8_t *>vs.audio_buf_rs + vs.audio_buf_index, len1)
+        else:
+            memcpy(stream, <uint8_t *>vs.audio_buf + vs.audio_buf_index, len1)
         l -= len1
         stream += len1
         vs.audio_buf_index += len1
+
+    if vs.quit == 1:
+        return
+
+    print '<<< leaved audio callback'
+
 
 cdef void refresh_timer_cb(void *data):
     cdef VideoState *vs = <VideoState *>data
@@ -768,8 +874,8 @@ cdef int video_thread(void *arg) with gil:
         # Save global pts to be stored in pFrame
         global_video_pkt_pts = packet.pts
         # Decode video frame
-        len1 = avcodec_decode_video2(vs.video_st.codec, pFrame, &frameFinished, 
-                                packet)
+        len1 = avcodec_decode_video2(
+                vs.video_st.codec, pFrame, &frameFinished, packet)
         if packet.dts == AV_NOPTS_VALUE and pFrame.opaque:
             memcpy(&ptst, pFrame.opaque, sizeof(uint64_t))
             if ptst != AV_NOPTS_VALUE:
@@ -818,14 +924,26 @@ cdef int stream_component_open(VideoState *vs, int stream_index):
         # search an empty channel
         vs.audio_channel = -1
         for i in xrange(MIX_CHANNELS_MAX):
-            if mix_channels[i] == 0:
-                mix_channels[i] = 1
+            if mix_channels_usage[i] == 0:
+                mix_channels_usage[i] = 1
                 vs.audio_channel = i
                 break
 
         if vs.audio_channel == -1:
             print 'No more audio channel available'
             return -1
+
+        # Do we need a resample context ?
+        if codecCtx.sample_rate != mix_rate or codecCtx.channels != mix_channels:
+            print 'need resample for', codecCtx.sample_rate, 'to', mix_rate
+            vs.audio_resample_ctx = av_audio_resample_init(
+                mix_channels, codecCtx.channels,
+                mix_rate, codecCtx.sample_rate,
+                1, codecCtx.sample_fmt,
+                16, 10, 1, 1)
+            if vs.audio_resample_ctx == NULL:
+                print 'Audio need resample, but unable to create it'
+                return -1
 
         # Create Mix Chunk from that entry
         filename = <bytes>join(dirname(__file__), 'silence.wav')
@@ -1000,11 +1118,15 @@ cdef int decode_thread(void *arg) with gil:
             continue
         
         if av_read_frame(vs.pFormatCtx, packet) < 0:
+            print 'av_read_frame() return bleh', pFormatCtx.pb.error
+            break
+            '''
             if pFormatCtx.pb.error == 0:
                 with nogil: SDL_Delay(100) # no error wait for user input
                 continue
             else:
                 break
+            '''
             
         
         # Is this a packet from the video stream?
@@ -1018,7 +1140,21 @@ cdef int decode_thread(void *arg) with gil:
     print 'all done, wait for it, but why ?'
 
     # all done - wait for it
+    cdef int canquit = 0
     while vs.quit == 0:
+        canquit = 0
+        with nogil:
+            SDL_LockMutex(vs.audioq.mutex)
+            if vs.audioq.nb_packets == 0:
+                canquit += 1
+            SDL_UnlockMutex(vs.audioq.mutex)
+            SDL_LockMutex(vs.videoq.mutex)
+            if vs.videoq.nb_packets == 0:
+                canquit += 1
+            SDL_UnlockMutex(vs.videoq.mutex)
+        if canquit == 2:
+            vs.quit = 1
+            break
         with nogil: SDL_Delay(100)
 
     print 'ok, we can leave now.'
@@ -1046,6 +1182,10 @@ cdef class FFVideo:
     def __init__(self, filename):
         self.filename = filename
 
+    property is_open:
+        def __get__(self):
+            return self.vs != NULL
+
     def open(self):
         cdef int i
         cdef VideoState *vs
@@ -1068,6 +1208,7 @@ cdef class FFVideo:
             len(self.filename)))
         vs.pictq_mutex = SDL_CreateMutex()
         vs.pictq_cond = SDL_CreateCond()
+        vs.audio_channel = -1
 
         schedule_refresh(vs, 40)
 
@@ -1080,6 +1221,48 @@ cdef class FFVideo:
 
         av_init_packet(&flush_pkt)
         flush_pkt.data = <uint8_t *><char *>'FLUSH'
+
+    cdef void free(self):
+        cdef VideoState *vs = self.vs
+        if vs == NULL:
+            return
+
+        # ensure that nobody will wait on a queue get
+        vs.audioq.quit = 1
+        vs.videoq.quit = 1
+
+        print 'wait for thread...'
+        if vs.parse_tid != NULL:
+            SDL_WaitThread(vs.parse_tid, NULL)
+            vs.parse_tid = NULL
+        print 'thread finished !'
+
+        event_queue_clean(&vs.eq)
+        packet_queue_clean(&vs.audioq)
+        packet_queue_clean(&vs.videoq)
+        if vs.pictq_mutex != NULL:
+            SDL_DestroyMutex(vs.pictq_mutex)
+        if vs.pictq_cond != NULL:
+            SDL_DestroyCond(vs.pictq_cond)
+        if vs.audio_channel != -1:
+            mix_channels_usage[vs.audio_channel] = 0
+            with nogil:
+                SDL_LockAudio()
+                Mix_UnregisterAllEffects(vs.audio_channel)
+                SDL_UnlockAudio()
+        if vs.pixels != NULL:
+            free(vs.pixels)
+            vs.pixels = NULL
+
+        av_free(vs)
+        self.vs = NULL
+
+        # flush events
+        cdef ScheduledEvent se
+        for item in self.events:
+            itime, se = item
+            free(se.event)
+        del self.events[:]
 
     cdef void update(self):
         cdef Event *event
@@ -1114,7 +1297,8 @@ cdef class FFVideo:
             elif event.name == FF_QUIT_EVENT:
                 print 'xxxxxxxxxxxxxxxxxxxxx QUIT EVENT !!!!!!!!!!!!!!!!!!!!!!!!!!', self.filename
                 self.vs.quit = 1
-                #self.stop()
+                self.free()
+                break
             elif event.name == FF_SCHEDULE_EVENT:
                 se = ScheduledEvent()
                 se.event = event
@@ -1143,6 +1327,9 @@ cdef class FFVideo:
         cdef int width, height
         cdef AVFrame *rgb
         cdef VideoState *vs = self.vs
+
+        if vs == NULL:
+            return
 
         self.update()
 

@@ -48,6 +48,8 @@ cdef extern from "libavcodec/avcodec.h":
         int64_t pts
         int repeat_pict
         void *opaque
+    enum AVSampleFormat:
+        pass
     struct AVCodecContext:
         int width
         int height
@@ -60,6 +62,7 @@ cdef extern from "libavcodec/avcodec.h":
         int (*get_buffer)(AVCodecContext *c, AVFrame *pic)
         void (*release_buffer)(AVCodecContext *c, AVFrame *pic)
         AVRational time_base
+        AVSampleFormat sample_fmt
     struct AVPicture:
         uint8_t *data[4]
         int linesize[4]
@@ -78,7 +81,7 @@ cdef extern from "libavcodec/avcodec.h":
     int avcodec_decode_video2(AVCodecContext *avctx, AVFrame *picture,
                          int *got_picture_ptr, AVPacket *avpkt)
     int avcodec_decode_audio2(AVCodecContext *avctx, int16_t *samples,
-                        int *frame_size_ptr, uint8_t *buf, int buf_size) 
+                        int *frame_size_ptr, uint8_t *buf, int buf_size)
     int avcodec_close(AVCodecContext *avctx) 
     void av_free_packet(AVPacket *pkt) 
     int av_dup_packet(AVPacket *pkt) 
@@ -91,6 +94,13 @@ cdef extern from "libavcodec/avcodec.h":
                        int pix_fmt, int width, int height) 
     int avcodec_default_get_buffer(AVCodecContext *s, AVFrame *pic)
     void avcodec_default_release_buffer(AVCodecContext *s, AVFrame *pic)
+
+    struct ReSampleContext:
+        pass
+
+    int audio_resample(ReSampleContext *, int16_t *output, int16_t *input, int nb_samples)
+    ReSampleContext *av_audio_resample_init(int, int, int, int, int, int, int, int, int, double)
+    void audio_resample_close(ReSampleContext *)
 
 cdef extern from "libavformat/avformat.h":
     struct AVStream:
@@ -179,6 +189,7 @@ cdef extern from "SDL.h":
 
     ctypedef int (*SDLCALL)(void *)
     SDL_Thread *SDL_CreateThread(SDLCALL, void *data) nogil
+    void SDL_WaitThread(SDL_Thread *thread, int *status)
 
     char *SDL_GetError()
 
@@ -197,7 +208,6 @@ cdef extern from "SDL.h":
     void SDL_LockAudio() nogil
     void SDL_UnlockAudio() nogil
 
-
 cdef extern from "SDL_mixer.h":
     struct Mix_Chunk:
         pass
@@ -210,7 +220,8 @@ cdef extern from "SDL_mixer.h":
     ctypedef void (*Mix_EffectFunc_t)(int, void *, int, void *)
     ctypedef void (*Mix_EffectDone_t)(int, void *)
     int Mix_RegisterEffect(int chan, Mix_EffectFunc_t f, Mix_EffectDone_t d, void * arg) nogil
+    int Mix_UnregisterAllEffects(int chan) nogil
     int Mix_AllocateChannels(int numchans)
     Mix_Chunk * Mix_LoadWAV(char *filename) nogil
-
+    int Mix_QuerySpec(int *frequency,uint16_t *format,int *channels)
 

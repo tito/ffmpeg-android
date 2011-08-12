@@ -16,6 +16,8 @@ if __name__ == '__main__':
     def queue_frame(img, video, dt):
         frame = video.get_next_frame()
         if frame is None:
+            if video.is_open == False:
+                img.texture = None
             return
         tex = img.texture
         if tex is None:
