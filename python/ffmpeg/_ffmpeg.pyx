@@ -1340,3 +1340,25 @@ cdef class FFVideo:
             return
         self.vs.seek_percent = percent / 100.
         self.vs.seek_req = 1
+
+    def set_volume(self, int volume):
+        if self.vs == NULL or self.vs.audio_channel == -1:
+            return
+        if volume < 0:
+            volume = 0
+        if volume > 128:
+            volume = 128
+        with nogil:
+            SDL_LockAudio()
+            Mix_Volume(self.vs.audio_channel, volume)
+            SDL_UnlockAudio()
+
+    def get_volume(self):
+        cdef int volume = 0
+        if self.vs == NULL or self.vs.audio_channel == -1:
+            return
+        with nogil:
+            SDL_LockAudio()
+            volume = Mix_Volume(self.vs.audio_channel, -1)
+            SDL_UnlockAudio()
+        return volume

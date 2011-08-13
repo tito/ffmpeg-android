@@ -1,4 +1,12 @@
-__version__ = '1.0'
+'''
+FFMPEG wrapper for just implementing a Player
+=============================================
+
+The player give you access to the raw RGB image (converted if needed.)
+The sound is automatically mixed.
+'''
+
+__version__ = (1, 0)
 __all__ = ('FFVideo', 'FFVideoException')
 
 from _ffmpeg import FFVideo, FFVideoException
