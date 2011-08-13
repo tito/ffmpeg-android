@@ -8,6 +8,8 @@ ctypedef unsigned short uint16_t
 
 DEF SDL_INIT_AUDIO = 0x10
 DEF PF_RGB24 = 2
+DEF AVSEEK_FLAG_BACKWARD = 1
+DEF AV_TIME_BASE = 1000000.
 
 cdef extern from "Python.h":
     void PyEval_InitThreads()
@@ -98,6 +100,7 @@ cdef extern from "libavformat/avformat.h" nogil:
     struct AVStream:
         AVCodecContext *codec
         AVRational time_base
+        int64_t duration
     struct ByteIOContext:
         int error
     struct AVFormatContext:
@@ -105,6 +108,7 @@ cdef extern from "libavformat/avformat.h" nogil:
         AVStream **streams
         char filename[1024]
         ByteIOContext *pb
+        int64_t duration
     struct AVFormatParameters:
         pass
     struct AVInputFormat:

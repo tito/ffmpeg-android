@@ -18,6 +18,7 @@ Some note from debugging stuff:
 TODO:
 
     - handle error case (looping on schedule/refresh even when no video)
+    - fix seek case, doesn't work when seek back.
 
 '''
 
@@ -106,8 +107,7 @@ cdef struct VideoState:
     double          external_clock # external clock base
     int64_t         external_clock_time
     int             seek_req
-    int             seek_flags
-    int64_t         seek_pos
+    double          seek_percent
     double          audio_clock
     AVStream        *audio_st
     PacketQueue     audioq
@@ -201,9 +201,9 @@ cdef int mix_audio_init():
 
     SDL_LockAudio()
 
-    print 'Audio ask for', mix_rate, mix_channels
+    print 'FFMPEG: Audio ask for', mix_rate, mix_channels
     Mix_QuerySpec(&mix_rate, NULL, &mix_channels)
-    print 'Audio ask got', mix_rate, mix_channels
+    print 'FFMPEG: Audio ask got', mix_rate, mix_channels
 
     Mix_AllocateChannels(MIX_CHANNELS_MAX)
 
@@ -557,20 +557,12 @@ cdef void audio_callback(int chan, void *stream, int l, void *userdata) nogil:
     if vs.quit == 1:
         return
 
-    #print '>>> enter audio callback'
-
     while l > 0:
 
-        #print 'audio_callback() again, need to fill', l
-        #print '  index is', vs.audio_buf_index
-        #print '  size is', vs.audio_buf_size
-
         if vs.audio_buf_index >= vs.audio_buf_size:
-            #print '======== ASK FOR FRAME'
             # We have already sent all our data; get more
             audio_size = audio_decode_frame(vs, vs.audio_buf,
                     sizeof(vs.audio_buf), &pts)
-            #print 'audio decode frame', vs.quit
             if vs.quit == 1:
                 return
             if audio_size < 0:
@@ -582,7 +574,6 @@ cdef void audio_callback(int chan, void *stream, int l, void *userdata) nogil:
                         audio_size, pts)
                 vs.audio_buf_size = audio_size
             vs.audio_buf_index = 0
-            #print 'audio decode frame got packet of', vs.audio_buf_size
 
             # resample it
             if vs.audio_resample_ctx != NULL:
@@ -591,17 +582,12 @@ cdef void audio_callback(int chan, void *stream, int l, void *userdata) nogil:
                     s = <double>(mix_rate) / <double>(vs.audio_st.codec.sample_rate)
                     s = dmax(1.0, s)
                     s *= sizeof(vs.audio_buf)
-                    with gil:
-                        print 'first time, allocation', s
                     vs.audio_buf_rs = <uint8_t *>av_malloc(<int>(s))
-                #print 'resample start', {'size': vs.audio_buf_size, 'index': vs.audio_buf_index}
                 isize = get_bits_per_sample_fmt(vs.audio_st.codec.sample_fmt) / 8
                 isample = vs.audio_buf_size / (vs.audio_st.codec.channels * isize)
                 osize = get_bits_per_sample_fmt(1) / 8 # 1 = AV_SAMPLE_FMT_S16
-                #print 'resample info', {'isize': isize, 'osize': osize, 'isample': isample, 'sample_fmt': vs.audio_st.codec.sample_fmt, 'ichannels': vs.audio_st.codec.channels}
                 size_out = audio_resample(vs.audio_resample_ctx, <int16_t *>vs.audio_buf_rs, <int16_t*>vs.audio_buf, isample)
                 vs.audio_buf_size = size_out * mix_channels * osize
-                #print 'resample done', vs.audio_buf_size
 
         len1 = vs.audio_buf_size - vs.audio_buf_index
         if len1 > l:
@@ -620,7 +606,6 @@ cdef void audio_callback(int chan, void *stream, int l, void *userdata) nogil:
 
 cdef void refresh_timer_cb(void *data) nogil:
     cdef VideoState *vs = <VideoState *>data
-    #print 'refresh_timer_cb()'
     event_queue_put_fast(&vs.eq, FF_REFRESH_EVENT, vs)
 
 cdef void schedule_refresh(VideoState *vs, int delay) nogil:
@@ -630,36 +615,6 @@ cdef void schedule_refresh(VideoState *vs, int delay) nogil:
     e.callback = <event_callback_t>refresh_timer_cb
     e.delay = delay
     event_queue_put(&vs.eq, e)
-    #print 'schedule_refresh()'
-
-cdef void video_display(VideoState *vs) nogil:
-    cdef int width = vs.video_st.codec.width
-    cdef int height = vs.video_st.codec.height
-    cdef int index, y, size
-    cdef AVFrame *rgb
-
-    if width == -1:
-        return
-
-    #print 'video_display()', vs.pictq_rindex
-
-    SDL_LockMutex(vs.pictq_mutex)
-
-    size = width * height * 3
-    if vs.pixels == NULL:
-        vs.pixels = <unsigned char *>malloc(size * sizeof(unsigned char))
-    if vs.pixels != NULL:
-        rgb = vs.pictq[vs.pictq_rindex].bmp
-        if rgb != NULL:
-            # copy frame into pixels
-            index = 0
-            for y in xrange(height):
-                memcpy(&vs.pixels[index], rgb.data[0] + \
-                        y * rgb.linesize[0], width * 3)
-                index += width * 3
-
-    SDL_UnlockMutex(vs.pictq_mutex)
-
 
 cdef void video_refresh_timer(void *userdata) nogil:
 
@@ -667,7 +622,6 @@ cdef void video_refresh_timer(void *userdata) nogil:
     cdef VideoPicture *vp
     cdef double actual_delay, delay, sync_threshold, ref_clock, diff
 
-    #print 'video_refresh_timer()'
     
     if vs.video_st:
         if vs.pictq_size == 0:
@@ -711,7 +665,7 @@ cdef void video_refresh_timer(void *userdata) nogil:
             schedule_refresh(vs, <int>(actual_delay * 1000 + 0.5))
 
             # show the picture!
-            video_display(vs)
+            #video_display(vs)
             
             # update queue for next picture!
             vs.pictq_rindex += 1
@@ -754,11 +708,8 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts) nogil:
     cdef AVPicture pict
     cdef SDL_UserEvent event
 
-    #print 'queue_picture()', vs.pictq_size
-
     # wait until we have space for a new pic
     SDL_LockMutex(vs.pictq_mutex)
-    #print 'queue_picture() after lock'
     while vs.pictq_size >= VIDEO_PICTURE_QUEUE_SIZE and not vs.quit:
         SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
     SDL_UnlockMutex(vs.pictq_mutex)
@@ -865,9 +816,6 @@ cdef int video_thread(void *arg) nogil:
 
     pFrame = avcodec_alloc_frame()
 
-    with gil:
-        print 'video_thread() started'
-
     while True:
         if packet_queue_get(&vs.videoq, packet, 1) < 0:
             # means we quit getting packets
@@ -905,11 +853,6 @@ cdef int video_thread(void *arg) nogil:
             
         av_free_packet(packet)
     
-    cdef int tid
-    with gil:
-        tid = <unsigned int>SDL_ThreadID()
-        print 'FFMPEG: in video_thread', tid
-        print 'video_thread() leaved'
     av_free(pFrame)
     return 0
 
@@ -1033,6 +976,7 @@ cdef int decode_thread(void *arg) nogil:
     cdef int stream_index = -1
     cdef int64_t seek_target = 0
     cdef AVRational AV_TIME_BASE_Q
+    cdef int seek_flags = 0
 
     AV_TIME_BASE_Q.num = 1
     AV_TIME_BASE_Q.den = 1000000
@@ -1094,7 +1038,6 @@ cdef int decode_thread(void *arg) nogil:
         # seek stuff goes here
         if vs.seek_req:
             stream_index = -1
-            seek_target = vs.seek_pos
 
             if vs.videoStream >= 0:
                 stream_index = vs.videoStream
@@ -1103,13 +1046,20 @@ cdef int decode_thread(void *arg) nogil:
 
             if stream_index >= 0:
 
+                seek_target = <int64_t>(<double>pFormatCtx.duration * vs.seek_percent)
+
                 seek_target = av_rescale_q(
                         seek_target, AV_TIME_BASE_Q,
                         pFormatCtx.streams[stream_index].time_base)
+
+                # FIXME, that doesnt work yet
+                if seek_target > get_master_clock(vs) * AV_TIME_BASE:
+                    seek_flags = 0
+                else:
+                    seek_flags = AVSEEK_FLAG_BACKWARD
             
-            if not av_seek_frame(vs.pFormatCtx, stream_index,
-                    seek_target, vs.seek_flags):
-                #print '%s: error while seeking' % vs.pFormatCtx.filename
+            if av_seek_frame(vs.pFormatCtx, stream_index,
+                    seek_target, seek_flags) < 0:
                 pass
             else:
                 if vs.audioStream >= 0:
@@ -1127,8 +1077,6 @@ cdef int decode_thread(void *arg) nogil:
             continue
         
         if av_read_frame(vs.pFormatCtx, packet) < 0:
-            with gil:
-                print 'av_read_frame() return bleh', pFormatCtx.pb.error
             break
             '''
             if pFormatCtx.pb.error == 0:
@@ -1165,9 +1113,7 @@ cdef int decode_thread(void *arg) nogil:
 
     event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
 
-    with gil:
-        print 'FFMPEG: SET EVERYTHING TO QUIT'
-        print 'FFMPEG: in decode_thread', SDL_ThreadID()
+    # video finished, set everythign to quit.
     vs.quit = 1
     vs.audioq.quit = 1
     vs.videoq.quit = 1
@@ -1180,13 +1126,9 @@ cdef int decode_thread(void *arg) nogil:
     SDL_CondSignal(vs.pictq_cond)
     SDL_UnlockMutex(vs.pictq_mutex)
 
-    with gil:
-        print 'FFMPEG: LEAVE HIM ALONE'
     if vs.video_tid != NULL:
         SDL_WaitThread(vs.video_tid, NULL)
         vs.video_tid = NULL
-    with gil:
-        print 'FFMPEG: KILL WAIT THREAD DONE.'
 
     return 0
 
@@ -1248,13 +1190,9 @@ cdef class FFVideo:
         if vs == NULL:
             return
 
-        print 'FFMPEG: in FFVideo.free()', SDL_ThreadID()
-        print 'FFMPEG: free called'
-
         # ensure that nobody will wait on a queue get
         vs.audioq.quit = 1
         vs.videoq.quit = 1
-        print 'FFMPEG: stop audio channels'
         if vs.audio_channel != -1:
             Mix_HaltChannel(vs.audio_channel)
             mix_channels_usage[vs.audio_channel] = 0
@@ -1263,41 +1201,31 @@ cdef class FFVideo:
                 Mix_UnregisterAllEffects(vs.audio_channel)
                 SDL_UnlockAudio()
 
-        print 'FFMPEG: ask for both thread to leave.'
         if vs.parse_tid != NULL:
-            print 'FFMPEG: we got a thread. how is quit ?'
-            print 'FFMPEG: wait for it.'
             with nogil:
                 SDL_WaitThread(vs.parse_tid, NULL)
-            print 'FFMPEG: set to null'
             vs.parse_tid = NULL
 
-        print 'FFMPEG: start to free event queue'
         event_queue_clean(&vs.eq)
-        print 'FFMPEG: start to free packet queue'
         packet_queue_clean(&vs.audioq)
         packet_queue_clean(&vs.videoq)
         if vs.pictq_mutex != NULL:
             SDL_DestroyMutex(vs.pictq_mutex)
         if vs.pictq_cond != NULL:
             SDL_DestroyCond(vs.pictq_cond)
-        print 'FFMPEG: free pixels'
         if vs.pixels != NULL:
             free(vs.pixels)
             vs.pixels = NULL
 
-        print 'FFMPEG: last avfree'
         av_free(vs)
         self.vs = NULL
 
         # flush events
-        print 'FFMPEG: remove scheduled events'
         cdef ScheduledEvent se
         for item in self.events:
             itime, se = item
             free(se.event)
         del self.events[:]
-        print 'FFMPEG: DONE FREE!'
 
     cdef void update(self):
         cdef Event *event
@@ -1314,7 +1242,6 @@ cdef class FFVideo:
             if curtime < itime:
                 continue
             self.events.remove(item)
-            #print 'xx execute callback, delay was', se.event.delay
             se.event.callback(se.event.userdata)
             free(se.event)
 
@@ -1323,7 +1250,6 @@ cdef class FFVideo:
             event = event_queue_get(&self.vs.eq)
             if event == NULL:
                 return
-            #print 'execute event', event.name
             if event.name == FF_ALLOC_EVENT:
                 alloc_picture(event.userdata)
             elif event.name == FF_REFRESH_EVENT:
@@ -1372,14 +1298,45 @@ cdef class FFVideo:
             return
 
         ret = None
-        size = self.get_width() * self.get_height() * 3
         with nogil:
             SDL_LockMutex(vs.pictq_mutex)
+
+        width = self.get_width()
+        height = self.get_height()
+        size = width * height * 3
+        if vs.pixels == NULL:
+            vs.pixels = <unsigned char *>malloc(size * sizeof(unsigned char))
         if vs.pixels != NULL:
+            rgb = vs.pictq[vs.pictq_rindex].bmp
+            if rgb != NULL:
+                # copy frame into pixels
+                index = 0
+                for y in xrange(height):
+                    memcpy(&vs.pixels[index], rgb.data[0] + \
+                            y * rgb.linesize[0], width * 3)
+                    index += width * 3
             ret = PyString_FromStringAndSize(<char *>vs.pixels, size)
+
         with nogil:
             SDL_UnlockMutex(vs.pictq_mutex)
 
         return ret
 
+    def stop(self):
+        self.free()
 
+    def get_duration(self):
+        if self.vs == NULL or self.vs.pFormatCtx == NULL:
+            return 0
+        return self.vs.pFormatCtx.duration / AV_TIME_BASE
+
+    def get_position(self):
+        if self.vs == NULL:
+            return 0
+        return get_master_clock(self.vs)
+
+    def seek(self, percent):
+        if self.vs == NULL:
+            return
+        self.vs.seek_percent = percent / 100.
+        self.vs.seek_req = 1
