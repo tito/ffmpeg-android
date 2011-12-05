@@ -1,4 +1,5 @@
 from os.path import dirname, join, realpath
+from os import environ
 from distutils.core import setup
 from distutils.extension import Extension
 try:
@@ -20,10 +21,13 @@ ext_files = ['ffmpeg/_ffmpeg.pyx']
 if not have_cython:
     # android build ?
     ext_files = [x.replace('.pyx', '.c') for x in ext_files]
+    pgs4a_root = environ.get('PGS4A_ROOT')
+    if not pgs4a_root:
+        raise Exception('This android build must be done inside PGS4A.')
     include_dirs = [
         '../build/ffmpeg/armeabi-v7a/include/',
-        '/home/tito/code/pgs4a-kivy/jni/sdl/include',
-        '/home/tito/code/pgs4a-kivy/jni/sdl_mixer'
+        join(pgs4a_root, 'jni', 'sdl', 'include'),
+        join(pgs4a_root, 'jni', 'sdl_mixer')
     ]
     p = realpath('../ffmpeg/')
     libraries = ['gcc', 'z', 'sdl', 'sdl_mixer']
