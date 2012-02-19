@@ -1,4 +1,4 @@
-from os.path import dirname, join, realpath
+from os.path import join, realpath
 from os import environ
 from distutils.core import setup
 from distutils.extension import Extension
@@ -18,14 +18,34 @@ extra_objects = []
 extra_compile_args=['-ggdb', '-O0']
 
 ext_files = ['ffmpeg/_ffmpeg.pyx']
-if not have_cython:
-    # android build ?
+root_ffmpeg = environ.get('FFMPEG_ROOT')
+if root_ffmpeg:
+    if not have_cython:
+        ext_files = [x.replace('.pyx', '.c') for x in ext_files]
+    root_ffmpeg = realpath(root_ffmpeg)
+    include_dirs = [join(root_ffmpeg, 'include')]
+    if environ.get('FFMPEG_INCLUDES'):
+        include_dirs += environ.get('FFMPEG_INCLUDES').split(' ')
+    if environ.get('FFMPEG_LIBRARY_DIRS'):
+        library_dirs += environ.get('FFMPEG_LIBRARY_DIRS').split(' ')
+    libraries = environ.get('FFMPEG_LIBRARIES', 'gcc z sdl sdl_mixer m').split(' ')
+    extra_compile_args = ['-ggdb', '-O3']
+    p = join(root_ffmpeg, 'lib')
+    extra_objects = [
+        join(p, 'libavformat.a'),
+        join(p, 'libavcodec.a'),
+        join(p, 'libswscale.a'),
+        join(p, 'libavcore.a'),
+        join(p, 'libavutil.a')]
+
+elif not have_cython:
+    # Special hack for PGS4A-android, should we deprecated it ?
     ext_files = [x.replace('.pyx', '.c') for x in ext_files]
     pgs4a_root = environ.get('PGS4A_ROOT')
     if not pgs4a_root:
         raise Exception('This android build must be done inside PGS4A.')
-    include_dirs = [
-        '../build/ffmpeg/armeabi-v7a/include/',
+    include_dirs = ['../build/ffmpeg/armeabi-v7a/include/']
+    e=[
         join(pgs4a_root, 'jni', 'sdl', 'include'),
         join(pgs4a_root, 'jni', 'sdl_mixer')
     ]
@@ -36,7 +56,7 @@ if not have_cython:
         join(p, 'libavformat', 'libavformat.a'),
         join(p, 'libavcodec', 'libavcodec.a'),
         join(p, 'libavdevice', 'libavdevice.a'),
-        join(p, 'libavfilter', 'libavfilter.a'),
+        #join(p, 'libavfilter', 'libavfilter.a'),
         join(p, 'libswscale', 'libswscale.a'),
         join(p, 'libavcore', 'libavcore.a'),
         join(p, 'libavutil', 'libavutil.a'),
