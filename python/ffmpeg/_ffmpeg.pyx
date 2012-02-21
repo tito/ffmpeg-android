@@ -1338,7 +1338,7 @@ cdef class FFVideo:
     def seek(self, percent):
         if self.vs == NULL:
             return
-        self.vs.seek_percent = percent / 100.
+        self.vs.seek_percent = percent
         self.vs.seek_req = 1
 
     def set_volume(self, int volume):
