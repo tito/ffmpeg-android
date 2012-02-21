@@ -527,7 +527,7 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
             # We have data, return it and come back for more later */
             return data_size
 
-        if pkt.data:
+        if pkt.data != flush_pkt.data:
             av_free_packet(pkt)
 
         if vs.quit:
