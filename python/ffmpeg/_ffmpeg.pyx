@@ -116,7 +116,7 @@ cdef struct VideoState:
     AVPacket        audio_pkt
     uint8_t         *audio_pkt_data
     int             audio_pkt_size
-    int             audio_hw_buf_size  
+    int             audio_hw_buf_size
     double          audio_diff_cum # used for AV difference average computation
     double          audio_diff_avg_coef
     double          audio_diff_threshold
@@ -314,7 +314,7 @@ cdef void packet_queue_clean(PacketQueue *q) nogil:
     q.quit = 1
     packet_queue_flush(q)
     SDL_LockMutex(q.mutex)
-    SDL_CondSignal(q.cond) 
+    SDL_CondSignal(q.cond)
     SDL_UnlockMutex(q.mutex)
     SDL_Delay(10)
     SDL_LockMutex(q.mutex)
@@ -349,7 +349,7 @@ cdef int packet_queue_put(PacketQueue *q, AVPacket *pkt) nogil:
     q.nb_packets += 1
     q.size += pkt1.pkt.size
 
-    SDL_CondSignal(q.cond) 
+    SDL_CondSignal(q.cond)
     SDL_UnlockMutex(q.mutex)
 
     return 0
@@ -436,7 +436,7 @@ cdef double get_master_clock(VideoState *vs) nogil:
         return get_audio_clock(vs)
     else:
         return get_external_clock(vs)
-    
+
 
 cdef int synchronize_audio(VideoState *vs, short *samples, int samples_size,
         double pts) nogil:
@@ -448,11 +448,11 @@ cdef int synchronize_audio(VideoState *vs, short *samples, int samples_size,
     cdef int wanted_size, min_size, max_size, nb_samples
     cdef uint8_t *samples_end, *q
     cdef int nb
-    
+
     n = 2 * vs.audio_st.codec.channels
-    
+
     if vs.av_sync_type != AV_SYNC_AUDIO_MASTER:
-        
+
         ref_clock = get_master_clock(vs)
         diff = get_audio_clock(vs) - ref_clock
         if diff < AV_NOSYNC_THRESHOLD:
@@ -470,7 +470,7 @@ cdef int synchronize_audio(VideoState *vs, short *samples, int samples_size,
                         wanted_size = min_size
                     elif wanted_size > max_size:
                         wanted_size = max_size
-                    
+
                     if wanted_size < samples_size:
                         # remove samples
                         samples_size = wanted_size
@@ -488,7 +488,7 @@ cdef int synchronize_audio(VideoState *vs, short *samples, int samples_size,
             # difference is TOO big reset diff stuff
             vs.audio_diff_avg_count = 0
             vs.audio_diff_cum = 0
-    
+
     return samples_size
 
 
@@ -506,7 +506,7 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
             data_size = buf_size
 
             len1 = avcodec_decode_audio2(
-                    vs.audio_st.codec, <int16_t *>vs.audio_buf, &data_size, 
+                    vs.audio_st.codec, <int16_t *>vs.audio_buf, &data_size,
                     vs.audio_pkt_data, vs.audio_pkt_size)
 
             if len1 < 0:
@@ -531,13 +531,14 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
             av_free_packet(pkt)
 
         if vs.quit:
-           return -1
+            return -1
 
         if packet_queue_get(&vs.audioq, pkt, 0) < 0:
             return -1
 
         if pkt.data == flush_pkt.data:
             avcodec_flush_buffers(vs.audio_st.codec)
+            continue
 
         vs.audio_pkt_data = pkt.data
         vs.audio_pkt_size = pkt.size
@@ -622,7 +623,7 @@ cdef void video_refresh_timer(void *userdata) nogil:
     cdef VideoPicture *vp
     cdef double actual_delay, delay, sync_threshold, ref_clock, diff
 
-    
+
     if vs.video_st:
         if vs.pictq_size == 0:
             schedule_refresh(vs, 1)
@@ -636,7 +637,7 @@ cdef void video_refresh_timer(void *userdata) nogil:
             if delay <= 0 or delay >= 1.0:
                 # if incorrect delay, use previous one
                 delay = vs.frame_last_delay
-            
+
             # save for next time
             vs.frame_last_delay = delay
             vs.frame_last_pts = vp.pts
@@ -645,7 +646,7 @@ cdef void video_refresh_timer(void *userdata) nogil:
             if vs.av_sync_type != AV_SYNC_VIDEO_MASTER:
                 ref_clock = get_master_clock(vs)
                 diff = vp.pts - ref_clock
-    
+
             # Skip or repeat the frame. Take delay into account
             # FFPlay still doesn't "know if this vs the best guess."
             sync_threshold = delay if (delay > AV_SYNC_THRESHOLD) else AV_SYNC_THRESHOLD
@@ -661,25 +662,25 @@ cdef void video_refresh_timer(void *userdata) nogil:
             if actual_delay < 0.010:
                 # Really it should skip the picture instead
                 actual_delay = 0.010
-            
+
             schedule_refresh(vs, <int>(actual_delay * 1000 + 0.5))
 
             # show the picture!
             #video_display(vs)
-            
+
             # update queue for next picture!
             vs.pictq_rindex += 1
             if vs.pictq_rindex == VIDEO_PICTURE_QUEUE_SIZE:
                 vs.pictq_rindex = 0
-            
+
             SDL_LockMutex(vs.pictq_mutex)
             vs.pictq_size -= 1
             SDL_CondSignal(vs.pictq_cond)
             SDL_UnlockMutex(vs.pictq_mutex)
-        
+
     else:
         schedule_refresh(vs, 100)
-    
+
 cdef void alloc_picture(void *userdata) nogil:
     cdef VideoState *vs = <VideoState *>userdata
     cdef VideoPicture *vp
@@ -729,7 +730,7 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts) nogil:
         # we have to do it in the main thread
         event_queue_put_fast(&vs.eq, FF_ALLOC_EVENT, vs)
 
-        # wait until we have a picture allocated 
+        # wait until we have a picture allocated
         SDL_LockMutex(vs.pictq_mutex)
         while not vp.allocated and not vs.quit:
             SDL_CondWait(vs.pictq_cond, vs.pictq_mutex)
@@ -737,10 +738,10 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts) nogil:
 
         if vs.quit:
             return -1
-        
-    
+
+
     # We have a place to put our picture on the queue
-    # If we are skipping a frame, do we set this to null 
+    # If we are skipping a frame, do we set this to null
     # but still return vp.allocated = 1?
 
     cdef int w, h
@@ -753,30 +754,30 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts) nogil:
         if vs.img_convert_ctx == NULL:
             w = vs.video_st.codec.width
             h = vs.video_st.codec.height
-            vs.img_convert_ctx = sws_getContext(w, h, 
-                    vs.video_st.codec.pix_fmt, w, h, 
+            vs.img_convert_ctx = sws_getContext(w, h,
+                    vs.video_st.codec.pix_fmt, w, h,
                     dst_pix_fmt, 4, NULL, NULL, NULL)
             if vs.img_convert_ctx == NULL:
                 with gil:
                     print 'Cannot initialize the conversion context!'
                 return -1
-        
+
         sws_scale(vs.img_convert_ctx, pFrame.data, pFrame.linesize,
                     0, vs.video_st.codec.height, vp.bmp.data, vp.bmp.linesize)
-        
+
         vp.pts = pts
 
         # now we inform our display thread that we have a pic ready
         vs.pictq_windex += 1
         if vs.pictq_windex == VIDEO_PICTURE_QUEUE_SIZE:
             vs.pictq_windex = 0
-        
+
         SDL_LockMutex(vs.pictq_mutex)
         vs.pictq_size += 1
         SDL_UnlockMutex(vs.pictq_mutex)
-    
+
     return 0
-        
+
 
 cdef double synchronize_video(VideoState *vs, AVFrame *src_frame, double pts) nogil:
     cdef double frame_delay
@@ -805,7 +806,7 @@ cdef int our_get_buffer(AVCodecContext *c, AVFrame *pic) nogil:
 cdef void our_release_buffer(AVCodecContext *c, AVFrame *pic) nogil:
     if pic != NULL: av_freep(&pic.opaque)
     avcodec_default_release_buffer(c, pic)
-        
+
 
 cdef int video_thread(void *arg) nogil:
     cdef VideoState *vs = <VideoState *>arg
@@ -820,11 +821,11 @@ cdef int video_thread(void *arg) nogil:
         if packet_queue_get(&vs.videoq, packet, 1) < 0:
             # means we quit getting packets
             break
-        
+
         if packet.data == flush_pkt.data:
             avcodec_flush_buffers(vs.video_st.codec)
             continue
-        
+
         pts = 0
 
         # Save global pts to be stored in pFrame
@@ -841,7 +842,7 @@ cdef int video_thread(void *arg) nogil:
             pts = packet.dts
         else:
             pts = 0
-        
+
         pts *= av_q2d(vs.video_st.time_base)
 
 
@@ -850,9 +851,9 @@ cdef int video_thread(void *arg) nogil:
             pts = synchronize_video(vs, pFrame, pts)
             if queue_picture(vs, pFrame, pts) < 0:
                 break
-            
+
         av_free_packet(packet)
-    
+
     av_free(pFrame)
     return 0
 
@@ -866,7 +867,7 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
 
     if stream_index < 0 or stream_index >= pFormatCtx.nb_streams:
         return -1
-    
+
     # Get a pointer to the codec context for the video stream
     codecCtx = pFormatCtx.streams[stream_index].codec
     cdef bytes filename
@@ -922,9 +923,9 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
         wanted_spec.callback = audio_callback
         wanted_spec.userdata = vs
         '''
-        
+
         vs.audio_hw_buf_size = SDL_AUDIO_BUFFER_SIZE
-    
+
     codec = avcodec_find_decoder(codecCtx.codec_id)
     if codec == NULL or avcodec_open(codecCtx, codec) < 0:
         print 'Unsupported codec!'
@@ -935,7 +936,7 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
         vs.audio_st = pFormatCtx.streams[stream_index]
         vs.audio_buf_size = 0
         vs.audio_buf_index = 0
-        
+
         # averaging filter for audio sync
         vs.audio_diff_avg_coef = exp(log(0.01 / AUDIO_DIFF_AVG_NB))
         vs.audio_diff_avg_count = 0
@@ -993,30 +994,30 @@ cdef int decode_thread(void *arg) nogil:
         return -1 # Couldn't open file
 
     vs.pFormatCtx = pFormatCtx
-    
+
     # Retrieve stream information
     if av_find_stream_info(pFormatCtx) < 0:
         return -1 # Couldn't find stream information
-    
+
     # Dump information about file onto standard error
     dump_format(pFormatCtx, 0, vs.filename, 0)
-    
+
     # Find the first video stream
     for i in xrange(pFormatCtx.nb_streams):
         codec_type = pFormatCtx.streams[i].codec.codec_type
         if codec_type == CODEC_TYPE_VIDEO and video_index < 0:
             video_index = i
-        
+
         if codec_type == CODEC_TYPE_AUDIO and audio_index < 0:
             audio_index = i
-        
+
     with gil:
         if audio_index >= 0:
             stream_component_open(vs, audio_index)
-        
+
         if video_index >= 0:
             stream_component_open(vs, video_index)
-         
+
 
         if vs.videoStream < 0 or vs.audioStream < 0:
             if vs.audioStream < 0 and audio_index >= 0:
@@ -1027,14 +1028,14 @@ cdef int decode_thread(void *arg) nogil:
                 print 'LEAVE EVERYTHING!'
                 event_queue_put_fast(&vs.eq, FF_QUIT_EVENT, vs)
                 return 0
-    
+
 
     # main decode loop
     while True:
 
         if vs.quit:
             break
-        
+
         # seek stuff goes here
         if vs.seek_req:
             stream_index = -1
@@ -1057,7 +1058,7 @@ cdef int decode_thread(void *arg) nogil:
                     seek_flags = 0
                 else:
                     seek_flags = AVSEEK_FLAG_BACKWARD
-            
+
             if av_seek_frame(vs.pFormatCtx, stream_index,
                     seek_target, seek_flags) < 0:
                 pass
@@ -1065,17 +1066,17 @@ cdef int decode_thread(void *arg) nogil:
                 if vs.audioStream >= 0:
                     packet_queue_flush(&vs.audioq)
                     packet_queue_put(&vs.audioq, &flush_pkt)
-                
+
                 if vs.videoStream >= 0:
                     packet_queue_flush(&vs.videoq)
                     packet_queue_put(&vs.videoq, &flush_pkt)
-    
+
             vs.seek_req = 0
-        
+
         if vs.audioq.size > MAX_AUDIOQ_SIZE or vs.videoq.size > MAX_VIDEOQ_SIZE:
             SDL_Delay(10)
             continue
-        
+
         if av_read_frame(vs.pFormatCtx, packet) < 0:
             break
             '''
@@ -1085,8 +1086,8 @@ cdef int decode_thread(void *arg) nogil:
             else:
                 break
             '''
-            
-        
+
+
         # Is this a packet from the video stream?
         if packet.stream_index == vs.videoStream:
             packet_queue_put(&vs.videoq, packet)
@@ -1094,7 +1095,7 @@ cdef int decode_thread(void *arg) nogil:
             packet_queue_put(&vs.audioq, packet)
         else:
             av_free_packet(packet)
-        
+
     # all done - wait for it
     cdef int canquit = 0
     while vs.quit == 0:

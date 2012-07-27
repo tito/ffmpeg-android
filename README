@@ -33,6 +33,8 @@ by running ./extract.sh.
 Building
 --------
 
+(not updated, don't use.)
+
 To build, first set the environment variable NDK to point to the
 directory where the NDK is installed:
 
@@ -46,9 +48,19 @@ with version numbers in the name), call ./clean-build.sh.
 Building Python extension
 -------------------------
 
-cd python
-python setup.py build_ext --inplace
+(Only video with h264+aac, usually named .mp4, will work.)
 
-And for testing:
+If you want to test on your computer, you need to build an x86 version::
 
-python ffmpeg/__init__.py <yourvideofile.mkv>
+	FFMPEG_ARCHS='x86' ./build-h264-aac.sh
+
+Then build the python extension::
+
+	cd python
+	FFMPEG_LIBRARIES='SDL SDL_mixer' FFMPEG_LIBRARY_DIRS='/usr/lib' \
+	FFMPEG_INCLUDES='/usr/include/SDL' FFMPEG_ROOT=../build/ffmpeg/x86/ \
+	python setup.py build_ext --inplace -f
+
+And for testing::
+
+	python ffmpeg/__init__.py <yourvideofile.mkv>
