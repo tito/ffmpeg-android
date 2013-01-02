@@ -38,7 +38,7 @@ for version in $FFMPEG_ARCHS; do
 
 	FLAGS="--disable-avfilter --disable-everything"
 	FLAGS="$FLAGS --enable-parser=h264,aac --enable-decoder=h264,aac"
-	FLAGS="$FLAGS --disable-pthreads --enable-protocol=file"
+	FLAGS="$FLAGS --disable-pthreads --enable-protocol=file --enable-protocol=http"
 	FLAGS="$FLAGS --enable-demuxer=sdp --enable-pic"
 	FLAGS="$FLAGS --enable-small --disable-avdevice"
 
