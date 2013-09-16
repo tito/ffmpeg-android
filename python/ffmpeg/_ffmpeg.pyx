@@ -1192,6 +1192,7 @@ cdef class FFVideo:
             return
 
         # ensure that nobody will wait on a queue get
+        vs.quit = 1
         vs.audioq.quit = 1
         vs.videoq.quit = 1
         if vs.audio_channel != -1:
