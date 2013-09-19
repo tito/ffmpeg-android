@@ -51,7 +51,8 @@ for version in $FFMPEG_ARCHS; do
 	# note: yeap, fPIC is already activated, but doesn't work when compiling shared python.
 	# some refs http://www.gentoo.org/proj/en/base/amd64/howtos/index.xml?part=1&chap=3,
 	# but no doc found to explain the real issue :/
-	FLAGS="$FLAGS --disable-asm"
+	#FLAGS="$FLAGS --disable-asm"
+	FLAGS="$FLAGS --enable-asm"
 
 	# disable some unused algo
 	# note: "golomb" are the one used in our video test, so don't use --disable-golomb
@@ -99,7 +100,9 @@ for version in $FFMPEG_ARCHS; do
 			ARM_FLAGS="$ARM_FLAGS --soname-prefix=/data/data/com.bambuser.broadcaster/lib/"
 
 			FLAGS="$ARM_FLAGS $FLAGS"
-			EXTRA_CFLAGS="-march=armv7-a -mfloat-abi=softfp -fPIC -DANDROID"
+			FLAGS="$FLAGS --enable-neon"
+			#EXTRA_CFLAGS="-march=armv7-a -mfloat-abi=softfp -fPIC -DANDROID"
+			EXTRA_CFLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=softfp -fPIC -DANDROID"
 			EXTRA_LDFLAGS=""
 			ABI="armeabi-v7a"
 			;;
@@ -114,8 +117,10 @@ for version in $FFMPEG_ARCHS; do
 	mkdir -p $DEST
 	echo $FLAGS --extra-cflags="$EXTRA_CFLAGS" --extra-ldflags="$EXTRA_LDFLAGS" > $DEST/info.txt
 	make distclean
+	set -x
 	./configure $FLAGS --extra-cflags="$EXTRA_CFLAGS" --extra-ldflags="$EXTRA_LDFLAGS" \
 		| tee $DEST/configuration.txt
+	set +x
 	[ $PIPESTATUS == 0 ] || exit 1
 	make clean
 	make -j4 || exit 1
