@@ -11,7 +11,7 @@ except ImportError:
     cmdclass = {}
 
 
-libraries = ['avcodec', 'avformat', 'swscale', 'SDL', 'SDL_mixer']
+libraries = ['avcodec', 'avformat', 'avresample', 'swscale', 'SDL', 'SDL_mixer']
 library_dirs = []
 include_dirs = []
 extra_objects = []
@@ -29,13 +29,13 @@ if root_ffmpeg:
     if environ.get('FFMPEG_LIBRARY_DIRS'):
         library_dirs += environ.get('FFMPEG_LIBRARY_DIRS').split(' ')
     libraries = environ.get('FFMPEG_LIBRARIES', 'gcc z sdl sdl_mixer m').split(' ')
-    extra_compile_args = ['-ggdb', '-O3']
+    extra_compile_args = ['-ggdb', '-O0']
     p = join(root_ffmpeg, 'lib')
     extra_objects = [
         join(p, 'libavformat.a'),
         join(p, 'libavcodec.a'),
         join(p, 'libswscale.a'),
-        join(p, 'libavcore.a'),
+        join(p, 'libavresample.a'),
         join(p, 'libavutil.a')]
 
 elif not have_cython:
@@ -54,12 +54,11 @@ elif not have_cython:
     extra_objects = [
         join(p, 'libavcodec', 'libavcodec.a'),
         join(p, 'libavformat', 'libavformat.a'),
-        join(p, 'libavcodec', 'libavcodec.a'),
         join(p, 'libavdevice', 'libavdevice.a'),
         #join(p, 'libavfilter', 'libavfilter.a'),
         join(p, 'libswscale', 'libswscale.a'),
-        join(p, 'libavcore', 'libavcore.a'),
         join(p, 'libavutil', 'libavutil.a'),
+        join(p, 'libavresample', 'libavresample.a'),
         #join(p, 'libpostproc', 'libavpostproc.a'),
         ]
 else:
@@ -73,6 +72,7 @@ ext = Extension(
     libraries=libraries,
     extra_objects=extra_objects,
     extra_compile_args=extra_compile_args,
+    #extra_link_args=['-Wl,-Bsymbolic']
 )
 
 setup(

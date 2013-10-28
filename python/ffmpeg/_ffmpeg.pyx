@@ -98,7 +98,8 @@ cdef struct EventQueue:
     SDL_mutex *mutex
 
 cdef struct VideoState:
-    uint8_t         audio_buf[(AVCODEC_MAX_AUDIO_FRAME_SIZE * 3) / 2]
+    uint8_t         *audio_buf
+    uint8_t         silence_buf[1024]
     AVFormatContext *pFormatCtx
     int             videoStream
     int             audioStream
@@ -143,8 +144,11 @@ cdef struct VideoState:
     unsigned char   *pixels
     Mix_Chunk       *audio_chunk
     int             audio_channel
-    ReSampleContext *audio_resample_ctx
-    uint8_t         *audio_buf_rs
+    AVAudioResampleContext *avr
+
+    int resample_sample_fmt
+    uint64_t resample_channel_layout
+    int resample_sample_rate
 
 cdef inline int get_bits_per_sample_fmt(int fmt) nogil:
     if fmt == 0: #U8
@@ -181,6 +185,8 @@ cdef int mix_rate = 44100
 cdef int mix_channels = 2
 cdef int mix_audio_have_init = 0
 cdef int mix_channels_usage[MIX_CHANNELS_MAX]
+cdef int mix_sample_fmt = AV_SAMPLE_FMT_S16
+cdef int mix_channel_layout = AV_CH_LAYOUT_STEREO
 
 cdef int mix_audio_init():
     global g_have_register_audio
@@ -493,36 +499,138 @@ cdef int synchronize_audio(VideoState *vs, short *samples, int samples_size,
 
 
 @cython.cdivision(True)
-cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
-        double *pts_ptr) nogil:
-    cdef AVPacket *pkt = &vs.audio_pkt
-    cdef int len1, data_size, n
-    cdef double pts
+cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
+    cdef:
+        AVPacket *pkt = &vs.audio_pkt
+        int len1, data_size, n
+        double pts
+        int got_frame = 0
+        AVFrame *frame = NULL
+        void *tmp_out
+        int out_samples, out_size, out_linesize, osize, nb_samples
+        int audio_resample, resample_changed
+
 
     while True:
 
         while vs.audio_pkt_size > 0:
 
-            data_size = buf_size
+            got_frame = 0
 
-            len1 = avcodec_decode_audio2(
-                    vs.audio_st.codec, <int16_t *>vs.audio_buf, &data_size,
-                    vs.audio_pkt_data, vs.audio_pkt_size)
+            if frame == NULL:
+                frame = avcodec_alloc_frame()
+                if frame == NULL:
+                    return -1
+            else:
+                avcodec_get_frame_defaults(frame)
+
+            len1 = avcodec_decode_audio4(vs.audio_st.codec,
+                    frame, &got_frame, pkt)
 
             if len1 < 0:
                 # if error, skip frame
                 vs.audio_pkt_size = 0
                 break
+
             vs.audio_pkt_data += len1
             vs.audio_pkt_size -= len1
-            if data_size <= 0:
+            if not got_frame:
                 # No data yet, get more frames
                 continue
+
+            # notes
+            # dec->channels                 vs.audio_st.codec.channels
+            # is->frame->format             frame.format
+            # is->frame->channel_layout     frame.channel_layout
+            # is->frame->sample_rate        frame.sample_rate
+            # is->frame->nb_samples         frame.nb_samples
+
+            data_size = av_samples_get_buffer_size(NULL,
+                    vs.audio_st.codec.channels,
+                    frame.nb_samples,
+                    <AVSampleFormat>frame.format, 1)
+
+            audio_resample = frame.format != mix_sample_fmt or \
+                    frame.channel_layout != mix_channel_layout or \
+                    frame.sample_rate != mix_rate
+            resample_changed = frame.format != vs.resample_sample_fmt or \
+                    frame.channel_layout != vs.resample_channel_layout or \
+                    frame.sample_rate != vs.resample_sample_rate
+
+            if (not vs.avr and audio_resample) or resample_changed:
+                with gil:
+                    print 'resampling audio needed, open it'
+                if vs.avr:
+                    avresample_free(&vs.avr)
+                vs.avr = avresample_alloc_context()
+                if vs.avr == NULL:
+                    with gil:
+                        print 'Audio need resample, but unable to create avr'
+                    return -1
+
+                with gil:
+                    print 'in_channel_layout', frame.channel_layout
+                    print 'out_channel_layout', mix_channel_layout
+                    print 'in_sample_fmt', frame.format
+                    print 'out_sample_fmt', mix_sample_fmt
+                    print 'in_sample_rate', frame.sample_rate
+                    print 'out_sample_rate', mix_rate
+
+                av_opt_set_int(vs.avr, 'in_channel_layout',
+                        frame.channel_layout, 0)
+                av_opt_set_int(vs.avr, 'out_channel_layout',
+                        mix_channel_layout, 0)
+                av_opt_set_int(vs.avr, 'in_sample_rate', frame.sample_rate, 0)
+                av_opt_set_int(vs.avr, 'out_sample_rate', mix_rate, 0)
+                av_opt_set_int(vs.avr, 'in_sample_fmt', frame.format, 0)
+                av_opt_set_int(vs.avr, 'out_sample_fmt', mix_sample_fmt, 0)
+                #av_opt_set_int(vs.avr, 'internal_sample_fmt', AV_SAMPLE_FMT_S16P, 0)
+
+                ret = avresample_open(vs.avr)
+                if ret != 0:
+                    with gil:
+                        print 'Audio need resample, but unable to open it.'
+                    return -1
+
+                vs.resample_sample_fmt = frame.format
+                vs.resample_channel_layout = frame.channel_layout
+                vs.resample_sample_rate = frame.sample_rate
+
+            if audio_resample:
+                osize = av_get_bytes_per_sample(<AVSampleFormat>mix_sample_fmt)
+                nb_samples = frame.nb_samples
+                out_size = av_samples_get_buffer_size(&out_linesize,
+                        mix_channels, nb_samples,
+                        <AVSampleFormat>mix_sample_fmt, 0)
+                tmp_out = av_realloc(vs.audio_buf, out_size)
+                if tmp_out == NULL:
+                    with gil:
+                        print 'Unable to realloc audio buffer'
+                    return -1
+                vs.audio_buf = <uint8_t *>tmp_out
+
+                out_samples = avresample_convert(vs.avr,
+                        &vs.audio_buf,
+                        out_linesize, nb_samples,
+                        frame.data,
+                        frame.linesize[0],
+                        frame.nb_samples)
+
+                if out_samples < 0:
+                    with gil:
+                        print 'avresample_convert() failed'
+                    return -1
+
+                data_size = out_samples * osize * mix_channels
+
+            else:
+                vs.audio_buf = frame.data[0]
+
+
             pts = vs.audio_clock
             memcpy(pts_ptr, &pts, sizeof(double))
-            n = 2 * vs.audio_st.codec.channels
-            vs.audio_clock += <double>data_size / <double>(n *
-                    vs.audio_st.codec.sample_rate)
+            n = mix_channels * av_get_bytes_per_sample(<AVSampleFormat>mix_sample_fmt)
+            vs.audio_clock += <double>data_size / <double>(n * mix_rate)
 
             # We have data, return it and come back for more later */
             return data_size
@@ -552,7 +660,7 @@ cdef int audio_decode_frame(VideoState *vs, uint8_t *audio_buf, int buf_size,
 cdef void audio_callback(int chan, void *stream, int l, void *userdata) nogil:
 
     cdef VideoState *vs = <VideoState *>userdata
-    cdef int len1, audio_size, size_out, isize, osize, isample
+    cdef int len1, audio_size, out_size, isize, osize, isample
     cdef double pts = 0, s
 
     if vs.quit == 1:
@@ -562,41 +670,23 @@ cdef void audio_callback(int chan, void *stream, int l, void *userdata) nogil:
 
         if vs.audio_buf_index >= vs.audio_buf_size:
             # We have already sent all our data; get more
-            audio_size = audio_decode_frame(vs, vs.audio_buf,
-                    sizeof(vs.audio_buf), &pts)
+            audio_size = audio_decode_frame(vs, &pts)
             if vs.quit == 1:
                 return
             if audio_size < 0:
                 # If error, output silence
-                vs.audio_buf_size = 1024
-                memset(vs.audio_buf, 0, vs.audio_buf_size)
+                vs.audio_buf = vs.silence_buf
+                vs.audio_buf_size = sizeof(vs.silence_buf)
             else:
                 audio_size = synchronize_audio(vs, <int16_t*>vs.audio_buf,
                         audio_size, pts)
                 vs.audio_buf_size = audio_size
             vs.audio_buf_index = 0
 
-            # resample it
-            if vs.audio_resample_ctx != NULL:
-
-                if vs.audio_buf_rs == NULL:
-                    s = <double>(mix_rate) / <double>(vs.audio_st.codec.sample_rate)
-                    s = dmax(1.0, s)
-                    s *= sizeof(vs.audio_buf)
-                    vs.audio_buf_rs = <uint8_t *>av_malloc(<int>(s))
-                isize = get_bits_per_sample_fmt(vs.audio_st.codec.sample_fmt) / 8
-                isample = vs.audio_buf_size / (vs.audio_st.codec.channels * isize)
-                osize = get_bits_per_sample_fmt(1) / 8 # 1 = AV_SAMPLE_FMT_S16
-                size_out = audio_resample(vs.audio_resample_ctx, <int16_t *>vs.audio_buf_rs, <int16_t*>vs.audio_buf, isample)
-                vs.audio_buf_size = size_out * mix_channels * osize
-
         len1 = vs.audio_buf_size - vs.audio_buf_index
         if len1 > l:
             len1 = l
-        if vs.audio_resample_ctx != NULL:
-            memcpy(stream, <uint8_t *>vs.audio_buf_rs + vs.audio_buf_index, len1)
-        else:
-            memcpy(stream, <uint8_t *>vs.audio_buf + vs.audio_buf_index, len1)
+        memcpy(stream, <uint8_t *>vs.audio_buf + vs.audio_buf_index, len1)
         l -= len1
         stream += len1
         vs.audio_buf_index += len1
@@ -762,8 +852,9 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts) nogil:
                     print 'Cannot initialize the conversion context!'
                 return -1
 
-        sws_scale(vs.img_convert_ctx, pFrame.data, pFrame.linesize,
-                    0, vs.video_st.codec.height, vp.bmp.data, vp.bmp.linesize)
+        sws_scale(vs.img_convert_ctx,
+                <const_uint8_ptr>pFrame.data, pFrame.linesize,
+                0, vs.video_st.codec.height, vp.bmp.data, vp.bmp.linesize)
 
         vp.pts = pts
 
@@ -872,7 +963,7 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
     codecCtx = pFormatCtx.streams[stream_index].codec
     cdef bytes filename
 
-    if codecCtx.codec_type == CODEC_TYPE_AUDIO:
+    if codecCtx.codec_type == AVMEDIA_TYPE_AUDIO:
         # Attach effect to that chunk
         # search an empty channel
         vs.audio_channel = -1
@@ -885,18 +976,6 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
         if vs.audio_channel == -1:
             print 'No more audio channel available'
             return -1
-
-        # Do we need a resample context ?
-        if codecCtx.sample_rate != mix_rate or codecCtx.channels != mix_channels:
-            print 'need resample for', codecCtx.sample_rate, 'to', mix_rate
-            vs.audio_resample_ctx = av_audio_resample_init(
-                mix_channels, codecCtx.channels,
-                mix_rate, codecCtx.sample_rate,
-                1, codecCtx.sample_fmt,
-                16, 10, 1, 1)
-            if vs.audio_resample_ctx == NULL:
-                print 'Audio need resample, but unable to create it'
-                return -1
 
         # Create Mix Chunk from that entry
         filename = <bytes>join(dirname(__file__), 'silence.wav')
@@ -927,11 +1006,11 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
         vs.audio_hw_buf_size = SDL_AUDIO_BUFFER_SIZE
 
     codec = avcodec_find_decoder(codecCtx.codec_id)
-    if codec == NULL or avcodec_open(codecCtx, codec) < 0:
+    if codec == NULL or avcodec_open2(codecCtx, codec, NULL) < 0:
         print 'Unsupported codec!'
         return -1
 
-    if codecCtx.codec_type == CODEC_TYPE_AUDIO:
+    if codecCtx.codec_type == AVMEDIA_TYPE_AUDIO:
         vs.audioStream = stream_index
         vs.audio_st = pFormatCtx.streams[stream_index]
         vs.audio_buf_size = 0
@@ -949,7 +1028,7 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
         with nogil:
             Mix_PlayChannel(vs.audio_channel, vs.audio_chunk, -1)
 
-    elif codecCtx.codec_type == CODEC_TYPE_VIDEO:
+    elif codecCtx.codec_type == AVMEDIA_TYPE_VIDEO:
         vs.videoStream = stream_index
         vs.video_st = pFormatCtx.streams[stream_index]
 
@@ -962,7 +1041,10 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
         codecCtx.get_buffer = our_get_buffer
         codecCtx.release_buffer = our_release_buffer
 
-cdef int decode_interrupt_cb() nogil:
+    else:
+        pass
+
+cdef int decode_interrupt_cb(void *not_used) nogil:
     if global_video_state != NULL:
         return global_video_state.quit
     return 0
@@ -986,29 +1068,31 @@ cdef int decode_thread(void *arg) nogil:
     vs.audioStream = -1
 
     global_video_state = vs
-    # will interrupt blocking functions if we quit!
-    url_set_interrupt_cb(decode_interrupt_cb)
 
     # Open video file
-    if av_open_input_file(&pFormatCtx, vs.filename, NULL, 0, NULL) != 0:
+    # will interrupt blocking functions if we quit!
+    pFormatCtx = avformat_alloc_context()
+    pFormatCtx.interrupt_callback.callback = decode_interrupt_cb
+    pFormatCtx.interrupt_callback.opaque = NULL
+    if avformat_open_input(&pFormatCtx, vs.filename, NULL, NULL) != 0:
         return -1 # Couldn't open file
 
     vs.pFormatCtx = pFormatCtx
 
     # Retrieve stream information
-    if av_find_stream_info(pFormatCtx) < 0:
+    if avformat_find_stream_info(pFormatCtx, NULL) < 0:
         return -1 # Couldn't find stream information
 
     # Dump information about file onto standard error
-    dump_format(pFormatCtx, 0, vs.filename, 0)
+    av_dump_format(pFormatCtx, 0, vs.filename, 0)
 
     # Find the first video stream
     for i in xrange(pFormatCtx.nb_streams):
         codec_type = pFormatCtx.streams[i].codec.codec_type
-        if codec_type == CODEC_TYPE_VIDEO and video_index < 0:
+        if codec_type == AVMEDIA_TYPE_VIDEO and video_index < 0:
             video_index = i
 
-        if codec_type == CODEC_TYPE_AUDIO and audio_index < 0:
+        if codec_type == AVMEDIA_TYPE_AUDIO and audio_index < 0:
             audio_index = i
 
     with gil:

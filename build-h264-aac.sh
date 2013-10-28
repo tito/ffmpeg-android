@@ -37,10 +37,11 @@ for version in $FFMPEG_ARCHS; do
 	DEST=../build/ffmpeg
 
 	FLAGS="--disable-avfilter --disable-everything"
-	FLAGS="$FLAGS --enable-parser=h264,aac --enable-decoder=h264,aac"
+	FLAGS="$FLAGS --enable-parser=h264,aac --enable-decoder=h263,h264,aac"
 	FLAGS="$FLAGS --disable-pthreads --enable-protocol=file"
 	FLAGS="$FLAGS --enable-demuxer=sdp --enable-pic"
 	FLAGS="$FLAGS --enable-small --disable-avdevice"
+	FLAGS="$FLAGS --enable-avresample"
 
 	# needed to prevent _ffmpeg.so: version node not found for symbol av_init_packet@LIBAVFORMAT_52
 	# /usr/bin/ld: failed to set dynamic section sizes: Bad value
@@ -51,14 +52,20 @@ for version in $FFMPEG_ARCHS; do
 	# note: yeap, fPIC is already activated, but doesn't work when compiling shared python.
 	# some refs http://www.gentoo.org/proj/en/base/amd64/howtos/index.xml?part=1&chap=3,
 	# but no doc found to explain the real issue :/
-	#FLAGS="$FLAGS --disable-asm"
-	FLAGS="$FLAGS --enable-asm"
+	FLAGS="$FLAGS --disable-asm"
+	#FLAGS="$FLAGS --enable-asm"
 
 	# disable some unused algo
 	# note: "golomb" are the one used in our video test, so don't use --disable-golomb
 	# note: and for aac decoding: "rdft", "mdct", and "fft" are needed
 	FLAGS="$FLAGS --disable-dxva2 --disable-vdpau --disable-vaapi"
-	FLAGS="$FLAGS --disable-lpc --disable-huffman --disable-dct --disable-aandct"
+	FLAGS="$FLAGS --disable-dct"
+
+	# disabled with ffmpeg 2.0
+	#FLAGS="$FLAGS --disable-huffman --disable-lpc --disable-aandct"
+
+	# add mpeg support (otherwise issue with avpriv_mpv_find_start_code missing)
+
 
 	# disable binaries / doc
 	FLAGS="$FLAGS --disable-ffmpeg --disable-ffplay --disable-ffprobe --disable-ffserver"
@@ -70,7 +77,8 @@ for version in $FFMPEG_ARCHS; do
 	case "$version" in
 		x86)
 			EXTRA_CFLAGS=""
-			EXTRA_LDLAGS=""
+			#EXTRA_LDFLAGS="-Wl,-Bsymbolic"
+			EXTRA_LDFLAGS=""
 			ABI="x86"
 			;;
 		neon)
@@ -91,13 +99,15 @@ for version in $FFMPEG_ARCHS; do
 				exit 1
 			fi
 
-			SYSROOT=$ANDROIDNDK/platforms/android-3/arch-arm
-			TOOLCHAIN=`echo $ANDROIDNDK/toolchains/arm-linux-androideabi-4.4.3/prebuilt/*-x86`
+			#SYSROOT=$ANDROIDNDK/platforms/android-8/arch-arm
+			#TOOLCHAIN=`echo $ANDROIDNDK/toolchains/arm-linux-androideabi-4.7/prebuilt/*-x86*`
+            SYSROOT=$ANDROIDNDK/platforms/android-3/arch-arm
+            TOOLCHAIN=`echo $ANDROIDNDK/toolchains/arm-linux-androideabi-4.4.3/prebuilt/*-x86`
 			echo "==> toolchain is $TOOLCHAIN"
 			export PATH=$TOOLCHAIN/bin:$PATH
 			ARM_FLAGS="--target-os=linux --cross-prefix=arm-linux-androideabi- --arch=arm"
 			ARM_FLAGS="$ARM_FLAGS --sysroot=$SYSROOT"
-			ARM_FLAGS="$ARM_FLAGS --soname-prefix=/data/data/com.bambuser.broadcaster/lib/"
+			#ARM_FLAGS="$ARM_FLAGS --soname-prefix=/data/data/com.bambuser.broadcaster/lib/"
 
 			FLAGS="$ARM_FLAGS $FLAGS"
 			FLAGS="$FLAGS --enable-neon"
