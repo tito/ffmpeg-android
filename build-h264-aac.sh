@@ -42,20 +42,19 @@ for version in $FFMPEG_ARCHS; do
 	FLAGS="$FLAGS --enable-demuxer=sdp --enable-pic"
 	FLAGS="$FLAGS --enable-small --disable-avdevice"
 	FLAGS="$FLAGS --enable-avresample"
-	FLAGS="$FLAGS --disable-pthreads"
+	#FLAGS="$FLAGS --disable-pthreads"
 	FLAGS="$FLAGS --enable-hwaccels"
-
-	# needed to prevent _ffmpeg.so: version node not found for symbol av_init_packet@LIBAVFORMAT_52
-	# /usr/bin/ld: failed to set dynamic section sizes: Bad value
-	FLAGS="$FLAGS --disable-symver"
 
 	# fix to prevent libavcodec.a(deinterlace.o): relocation R_X86_64_PC32 against symbol
 	# `ff_pw_4' can not be used when making a shared object; recompile with -fPIC
 	# note: yeap, fPIC is already activated, but doesn't work when compiling shared python.
 	# some refs http://www.gentoo.org/proj/en/base/amd64/howtos/index.xml?part=1&chap=3,
 	# but no doc found to explain the real issue :/
-	#FLAGS="$FLAGS --disable-asm"
-	FLAGS="$FLAGS --enable-asm"
+	FLAGS="$FLAGS --disable-asm"
+
+	# needed to prevent _ffmpeg.so: version node not found for symbol av_init_packet@LIBAVFORMAT_52
+	# /usr/bin/ld: failed to set dynamic section sizes: Bad value
+	FLAGS="$FLAGS --disable-symver"
 
 	# disable some unused algo
 	# note: "golomb" are the one used in our video test, so don't use --disable-golomb
@@ -66,9 +65,6 @@ for version in $FFMPEG_ARCHS; do
 	# disabled with ffmpeg 2.0
 	#FLAGS="$FLAGS --disable-huffman --disable-lpc --disable-aandct"
 
-	# add mpeg support (otherwise issue with avpriv_mpv_find_start_code missing)
-
-
 	# disable binaries / doc
 	FLAGS="$FLAGS --disable-ffmpeg --disable-ffplay --disable-ffprobe --disable-ffserver"
 	FLAGS="$FLAGS --disable-doc"
@@ -78,6 +74,7 @@ for version in $FFMPEG_ARCHS; do
 
 	case "$version" in
 		x86)
+
 			EXTRA_CFLAGS=""
 			#EXTRA_LDFLAGS="-Wl,-Bsymbolic"
 			EXTRA_LDFLAGS=""

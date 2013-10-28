@@ -233,13 +233,15 @@ cdef int ffmpeg_mutex_mgr(void **_mutex, AVLockOp op) nogil:
         return -1
     return 0
 
-cdef void ffmpeg_log_callback(void *ptr, int level, const_char_ptr fmt, va_list vl) nogil:
+cdef void ffmpeg_log_callback(void *ptr, int level, const_char_ptr fmt, va_list
+        vl) nogil:
     cdef char message[1024]
     cdef int type[2]
     cdef int print_prefix = 1
     av_log_format_line(ptr, level, fmt, vl, message, 1024, &print_prefix)
-    with gil:
-        print 'ffmpeg:', message
+    # XXX if we acquire the gil here, we are still having the ffmpeg mutex, so
+    # we have a deadlock
+    # print 'ffmpeg:', message
 
 cdef void ffmpeg_ensure_init():
     # ensure that ffmpeg have been registered first
@@ -253,7 +255,7 @@ cdef void ffmpeg_ensure_init():
     av_register_all()
 
     # ensure log will be printed
-    av_log_set_callback(ffmpeg_log_callback)
+    #av_log_set_callback(ffmpeg_log_callback)
 
     # add mutex management
     av_lockmgr_register(ffmpeg_mutex_mgr)
@@ -568,23 +570,23 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
                     frame.sample_rate != vs.resample_sample_rate
 
             if (not vs.avr and audio_resample) or resample_changed:
-                with gil:
-                    print 'resampling audio needed, open it'
+                #with gil:
+                #    print 'resampling audio needed, open it'
                 if vs.avr:
                     avresample_free(&vs.avr)
                 vs.avr = avresample_alloc_context()
                 if vs.avr == NULL:
-                    with gil:
-                        print 'Audio need resample, but unable to create avr'
+                    #with gil:
+                    #    print 'Audio need resample, but unable to create avr'
                     return -1
 
-                with gil:
-                    print 'in_channel_layout', frame.channel_layout
-                    print 'out_channel_layout', mix_channel_layout
-                    print 'in_sample_fmt', frame.format
-                    print 'out_sample_fmt', mix_sample_fmt
-                    print 'in_sample_rate', frame.sample_rate
-                    print 'out_sample_rate', mix_rate
+                #with gil:
+                #    print 'in_channel_layout', frame.channel_layout
+                #    print 'out_channel_layout', mix_channel_layout
+                #    print 'in_sample_fmt', frame.format
+                #    print 'out_sample_fmt', mix_sample_fmt
+                #    print 'in_sample_rate', frame.sample_rate
+                #    print 'out_sample_rate', mix_rate
 
                 av_opt_set_int(vs.avr, 'in_channel_layout',
                         frame.channel_layout, 0)
@@ -598,8 +600,8 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
 
                 ret = avresample_open(vs.avr)
                 if ret != 0:
-                    with gil:
-                        print 'Audio need resample, but unable to open it.'
+                    #with gil:
+                    #    print 'Audio need resample, but unable to open it.'
                     return -1
 
                 vs.resample_sample_fmt = frame.format
@@ -614,8 +616,8 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
                         <AVSampleFormat>mix_sample_fmt, 0)
                 tmp_out = av_realloc(vs.audio_buf, out_size)
                 if tmp_out == NULL:
-                    with gil:
-                        print 'Unable to realloc audio buffer'
+                    #with gil:
+                    #    print 'Unable to realloc audio buffer'
                     return -1
                 vs.audio_buf = <uint8_t *>tmp_out
 
@@ -627,8 +629,8 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
                         frame.nb_samples)
 
                 if out_samples < 0:
-                    with gil:
-                        print 'avresample_convert() failed'
+                    #with gil:
+                    #    print 'avresample_convert() failed'
                     return -1
 
                 data_size = out_samples * osize * mix_channels
@@ -858,8 +860,8 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts) nogil:
                     vs.video_st.codec.pix_fmt, w, h,
                     dst_pix_fmt, 4, NULL, NULL, NULL)
             if vs.img_convert_ctx == NULL:
-                with gil:
-                    print 'Cannot initialize the conversion context!'
+                #with gil:
+                #    print 'Cannot initialize the conversion context!'
                 return -1
 
         sws_scale(vs.img_convert_ctx,
@@ -932,9 +934,8 @@ cdef int video_thread(void *arg) nogil:
         # Save global pts to be stored in pFrame
         global_video_pkt_pts = packet.pts
         # Decode video frame
-        with gil:
-            len1 = avcodec_decode_video2(
-                    vs.video_st.codec, pFrame, &frameFinished, packet)
+        len1 = avcodec_decode_video2(
+                vs.video_st.codec, pFrame, &frameFinished, packet)
         if packet.dts == AV_NOPTS_VALUE and pFrame.opaque:
             memcpy(&ptst, pFrame.opaque, sizeof(uint64_t))
             if ptst != AV_NOPTS_VALUE:
