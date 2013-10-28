@@ -263,8 +263,10 @@ cdef extern from "SDL_mixer.h" nogil:
     int Mix_Volume(int chan, int volume)
 
 
-cdef extern from "libavfilter/avfilter.h" nogil:
+cdef extern from "libavutil/samplefmt.h" nogil:
     int AV_SAMPLE_FMT_U8P
     int AV_SAMPLE_FMT_S16
     int AV_SAMPLE_FMT_S16P
+
+cdef extern from "libavutil/channel_layout.h" nogil:
     int AV_CH_LAYOUT_STEREO
