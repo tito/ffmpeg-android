@@ -38,10 +38,12 @@ for version in $FFMPEG_ARCHS; do
 
 	FLAGS="--disable-avfilter --disable-everything"
 	FLAGS="$FLAGS --enable-parser=h264,aac --enable-decoder=h263,h264,aac"
-	FLAGS="$FLAGS --disable-pthreads --enable-protocol=file"
+	FLAGS="$FLAGS --enable-protocol=file"
 	FLAGS="$FLAGS --enable-demuxer=sdp --enable-pic"
 	FLAGS="$FLAGS --enable-small --disable-avdevice"
 	FLAGS="$FLAGS --enable-avresample"
+	FLAGS="$FLAGS --disable-pthreads"
+	FLAGS="$FLAGS --enable-hwaccels"
 
 	# needed to prevent _ffmpeg.so: version node not found for symbol av_init_packet@LIBAVFORMAT_52
 	# /usr/bin/ld: failed to set dynamic section sizes: Bad value
@@ -52,8 +54,8 @@ for version in $FFMPEG_ARCHS; do
 	# note: yeap, fPIC is already activated, but doesn't work when compiling shared python.
 	# some refs http://www.gentoo.org/proj/en/base/amd64/howtos/index.xml?part=1&chap=3,
 	# but no doc found to explain the real issue :/
-	FLAGS="$FLAGS --disable-asm"
-	#FLAGS="$FLAGS --enable-asm"
+	#FLAGS="$FLAGS --disable-asm"
+	FLAGS="$FLAGS --enable-asm"
 
 	# disable some unused algo
 	# note: "golomb" are the one used in our video test, so don't use --disable-golomb
@@ -112,7 +114,8 @@ for version in $FFMPEG_ARCHS; do
 			FLAGS="$ARM_FLAGS $FLAGS"
 			FLAGS="$FLAGS --enable-neon"
 			#EXTRA_CFLAGS="-march=armv7-a -mfloat-abi=softfp -fPIC -DANDROID"
-			EXTRA_CFLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=softfp -fPIC -DANDROID"
+			#EXTRA_CFLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=softfp -fPIC -DANDROID"
+			EXTRA_CFLAGS="-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp -fPIC -DANDROID"
 			EXTRA_LDFLAGS=""
 			ABI="armeabi-v7a"
 			;;

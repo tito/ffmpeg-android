@@ -270,3 +270,13 @@ cdef extern from "libavutil/samplefmt.h" nogil:
 
 cdef extern from "libavutil/channel_layout.h" nogil:
     int AV_CH_LAYOUT_STEREO
+
+cdef extern from "stdarg.h" nogil:
+    ctypedef struct va_list:
+        pass
+
+cdef extern from "libavutil/log.h" nogil:
+    ctypedef void (*log_callback_t)(void *, int, const_char_ptr, va_list)
+    void av_log_set_callback(log_callback_t cb)
+    void av_log_format_line(void *, int, const_char_ptr, va_list, char *, int,
+            int*)

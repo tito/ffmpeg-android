@@ -233,6 +233,13 @@ cdef int ffmpeg_mutex_mgr(void **_mutex, AVLockOp op) nogil:
         return -1
     return 0
 
+cdef void ffmpeg_log_callback(void *ptr, int level, const_char_ptr fmt, va_list vl) nogil:
+    cdef char message[1024]
+    cdef int type[2]
+    cdef int print_prefix = 1
+    av_log_format_line(ptr, level, fmt, vl, message, 1024, &print_prefix)
+    with gil:
+        print 'ffmpeg:', message
 
 cdef void ffmpeg_ensure_init():
     # ensure that ffmpeg have been registered first
@@ -244,6 +251,9 @@ cdef void ffmpeg_ensure_init():
 
     PyEval_InitThreads()
     av_register_all()
+
+    # ensure log will be printed
+    av_log_set_callback(ffmpeg_log_callback)
 
     # add mutex management
     av_lockmgr_register(ffmpeg_mutex_mgr)
