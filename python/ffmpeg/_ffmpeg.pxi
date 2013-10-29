@@ -12,7 +12,6 @@ cdef extern from *:
 
 
 DEF SDL_INIT_AUDIO = 0x10
-DEF PF_RGB24 = 2
 DEF AVSEEK_FLAG_BACKWARD = 1
 DEF AV_TIME_BASE = 1000000.
 
@@ -186,6 +185,10 @@ cdef extern from "libavutil/avutil.h" nogil:
 
 cdef extern from "libavutil/opt.h" nogil:
     int av_opt_set_int(void *, const_char_ptr, int64_t, int)
+
+cdef extern from "libavutil/pixfmt.h" nogil:
+    int AV_PIX_FMT_RGB24
+    #int AV_PIX_FMT_RGBA
 
 cdef extern from "SDL.h" nogil:
     struct SDL_AudioSpec:

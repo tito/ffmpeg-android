@@ -141,7 +141,6 @@ cdef struct VideoState:
     int             quit
     EventQueue      eq
     SwsContext      *img_convert_ctx
-    unsigned char   *pixels
     Mix_Chunk       *audio_chunk
     int             audio_channel
     AVAudioResampleContext *avr
@@ -794,10 +793,10 @@ cdef void alloc_picture(void *userdata) nogil:
     vp.width = vs.video_st.codec.width
     vp.height = vs.video_st.codec.height
 
-    vp.ff_data_size = avpicture_get_size(PF_RGB24, vp.width, vp.height)
+    vp.ff_data_size = avpicture_get_size(AV_PIX_FMT_RGB24, vp.width, vp.height)
     vp.ff_data = <unsigned char *>av_malloc(vp.ff_data_size * sizeof(unsigned char))
     vp.bmp = avcodec_alloc_frame()
-    avpicture_fill(<AVPicture *>vp.bmp, vp.ff_data, PF_RGB24,
+    avpicture_fill(<AVPicture *>vp.bmp, vp.ff_data, AV_PIX_FMT_RGB24,
             vp.width, vp.height)
 
     SDL_LockMutex(vs.pictq_mutex)
@@ -850,7 +849,7 @@ cdef int queue_picture(VideoState *vs, AVFrame *pFrame, double pts) nogil:
 
     if vp.bmp != NULL:
 
-        dst_pix_fmt = PF_RGB24
+        dst_pix_fmt = AV_PIX_FMT_RGB24
 
         # Convert the image into YUV format that SDL uses
         if vs.img_convert_ctx == NULL:
@@ -1310,9 +1309,6 @@ cdef class FFVideo:
             SDL_DestroyMutex(vs.pictq_mutex)
         if vs.pictq_cond != NULL:
             SDL_DestroyCond(vs.pictq_cond)
-        if vs.pixels != NULL:
-            free(vs.pixels)
-            vs.pixels = NULL
 
         av_free(vs)
         self.vs = NULL
@@ -1401,18 +1397,9 @@ cdef class FFVideo:
         width = self.get_width()
         height = self.get_height()
         size = width * height * 3
-        if vs.pixels == NULL:
-            vs.pixels = <unsigned char *>malloc(size * sizeof(unsigned char))
-        if vs.pixels != NULL:
-            rgb = vs.pictq[vs.pictq_rindex].bmp
-            if rgb != NULL:
-                # copy frame into pixels
-                index = 0
-                for y in xrange(height):
-                    memcpy(&vs.pixels[index], rgb.data[0] + \
-                            y * rgb.linesize[0], width * 3)
-                    index += width * 3
-            ret = PyString_FromStringAndSize(<char *>vs.pixels, size)
+        rgb = vs.pictq[vs.pictq_rindex].bmp
+        if rgb:
+            ret = PyString_FromStringAndSize(<char *>rgb.data[0], size)
 
         with nogil:
             SDL_UnlockMutex(vs.pictq_mutex)
