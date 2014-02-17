@@ -80,6 +80,16 @@ for version in $FFMPEG_ARCHS; do
 			EXTRA_LDFLAGS=""
 			ABI="x86"
 			;;
+		ios)
+			FLAGS="$FLAGS --enable-cross-compile --arch=arm --target-os=darwin"
+			ARM_FLAGS="$ARM_FLAGS -marm --sysroot=$SYSROOT"
+			EXTRA_CFLAGS="$ARM_FLAGS $ARM_CFLAGS -miphoneos-version-min=${MIN_VERSION} -mthumb"
+			EXTRA_LDFLAGS="$ARM_FLAGS $ARM_LDFLAGS -miphoneos-version-min=${MIN_VERSION}"
+			#EXTRA_LDFLAGS="-Wl,--fix-cortex-a8"
+			# Runtime choosing neon vs non-neon requires
+			# renamed files
+			ABI="armeabi-neon"
+			;;
 		neon)
 			echo "Arch neon is not supported yet"
 			exit 1
