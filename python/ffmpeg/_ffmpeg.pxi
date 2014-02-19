@@ -225,7 +225,10 @@ cdef extern from "SDL.h" nogil:
         pass
 
     ctypedef int (*SDLCALL)(void *)
-    SDL_Thread *SDL_CreateThread(SDLCALL, void *data)
+    # SDL 1
+    #SDL_Thread *SDL_CreateThread(SDLCALL, void *data)
+    # SDL 2
+    SDL_Thread *SDL_CreateThread(SDLCALL, char *name, void *data)
     void SDL_WaitThread(SDL_Thread *thread, int *status)
     uint32_t SDL_ThreadID()
 

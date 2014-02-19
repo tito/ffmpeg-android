@@ -1047,7 +1047,7 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
         vs.video_current_pts_time = av_gettime()
 
         packet_queue_init(&vs.videoq)
-        vs.video_tid = SDL_CreateThread(video_thread, vs)
+        vs.video_tid = SDL_CreateThread(video_thread, "video", vs)
         codecCtx.get_buffer = our_get_buffer
         codecCtx.release_buffer = our_release_buffer
 
@@ -1272,7 +1272,7 @@ cdef class FFVideo:
 
         vs.av_sync_type = DEFAULT_AV_SYNC_TYPE
         with nogil:
-            vs.parse_tid = SDL_CreateThread(decode_thread, vs)
+            vs.parse_tid = SDL_CreateThread(decode_thread, "decode", vs)
         if vs.parse_tid == NULL:
             av_free(vs)
             self.vs = NULL
@@ -1446,3 +1446,4 @@ cdef class FFVideo:
             volume = Mix_Volume(self.vs.audio_channel, -1)
             SDL_UnlockAudio()
         return volume
+
