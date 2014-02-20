@@ -187,6 +187,11 @@ cdef int mix_channels_usage[MIX_CHANNELS_MAX]
 cdef int mix_sample_fmt = AV_SAMPLE_FMT_S16
 cdef int mix_channel_layout = AV_CH_LAYOUT_STEREO
 
+# manually crafted a WAV 16bit stereo of 0.1s silence
+cdef str silence_wav = (
+    'RIFF\x0cE\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x02\x00D\xac\x00\x00'
+    '\x10\xb1\x02\x00\x04\x00\x10\x00data\xe8D\x00\x00') + '\x00' * 17640
+
 cdef int mix_audio_init():
     global g_have_register_audio
     global mix_rate, mix_channels
@@ -989,7 +994,8 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
 
         # Create Mix Chunk from that entry
         filename = <bytes>join(dirname(__file__), 'silence.wav')
-        vs.audio_chunk = Mix_LoadWAV(filename)
+        vs.audio_chunk = Mix_LoadWAV_RW(
+                SDL_RWFromMem(<char *><bytes>silence_wav, len(silence_wav)), 1)
         if vs.audio_chunk == NULL:
             print 'Unable to load chunk'
             return -1

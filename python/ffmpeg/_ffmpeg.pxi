@@ -66,9 +66,9 @@ cdef extern from "libavcodec/avcodec.h" nogil:
         int64_t dts
         uint8_t *data
     double av_q2d(AVRational a)
-        
-    void av_register_all() 
-    AVCodec *avcodec_find_decoder(int cid) 
+
+    void av_register_all()
+    AVCodec *avcodec_find_decoder(int cid)
 
     int avcodec_open2(AVCodecContext *avctx, AVCodec *codec,
             AVDictionary **options)
@@ -82,7 +82,7 @@ cdef extern from "libavcodec/avcodec.h" nogil:
     ctypedef int (*lockmgr_t)(void **mutex, AVLockOp op)
     int av_lockmgr_register(lockmgr_t cb)
 
-    AVFrame *avcodec_alloc_frame() 
+    AVFrame *avcodec_alloc_frame()
     int avcodec_decode_video2(AVCodecContext *avctx, AVFrame *picture,
                          int *got_picture_ptr, AVPacket *avpkt)
     int avcodec_decode_audio4(AVCodecContext *avctx, AVFrame *frame, int
@@ -93,9 +93,9 @@ cdef extern from "libavcodec/avcodec.h" nogil:
     void av_init_packet(AVPacket *pkt)
 
 
-    int avpicture_get_size(int pix_fmt, int width, int height) 
+    int avpicture_get_size(int pix_fmt, int width, int height)
     int avpicture_fill(AVPicture *picture, unsigned char *ptr,
-                       int pix_fmt, int width, int height) 
+                       int pix_fmt, int width, int height)
     int avcodec_default_get_buffer(AVCodecContext *s, AVFrame *pic)
     void avcodec_default_release_buffer(AVCodecContext *s, AVFrame *pic)
 
@@ -151,8 +151,8 @@ cdef extern from "libavformat/avformat.h" nogil:
     int avformat_open_input(AVFormatContext **ic, char *filename,
             AVInputFormat *fmt, AVDictionary **options) with gil
     int avformat_find_stream_info(AVFormatContext *ic, AVDictionary **options)
-    int av_read_frame(AVFormatContext *s, AVPacket *pkt) 
-    void av_close_input_file(AVFormatContext *s) 
+    int av_read_frame(AVFormatContext *s, AVPacket *pkt)
+    void av_close_input_file(AVFormatContext *s)
 
     void *av_malloc(unsigned int size) nogil
     void *av_mallocz(unsigned int size) nogil
@@ -160,7 +160,7 @@ cdef extern from "libavformat/avformat.h" nogil:
     void av_freep(void *ptr) nogil
     int64_t av_gettime()
     void av_dump_format(AVFormatContext *ic, int index,
-            char *url, int is_output) 
+            char *url, int is_output)
     int av_seek_frame(AVFormatContext *s, int stream_index, int64_t timestamp, int flags)
 
 cdef extern from "libswscale/swscale.h" nogil:
@@ -170,10 +170,10 @@ cdef extern from "libswscale/swscale.h" nogil:
         pass
     int sws_scale(SwsContext *context, const_uint8_ptr srcSlice,
             int srcStride[], int srcSliceY, int srcSliceH,
-            unsigned char* dst[], int dstStride[]) 
+            unsigned char* dst[], int dstStride[])
     SwsContext *sws_getContext(int srcW, int srcH, int srcFormat,
             int dstW, int dstH, int dstFormat, int flags,
-            SwsFilter *srcFilter, SwsFilter *dstFilter, double *param) 
+            SwsFilter *srcFilter, SwsFilter *dstFilter, double *param)
 
 cdef extern from "libavutil/avutil.h" nogil:
     void *av_realloc(void *ptr, size_t size)
@@ -264,7 +264,13 @@ cdef extern from "SDL_mixer.h" nogil:
     int Mix_RegisterEffect(int chan, Mix_EffectFunc_t f, Mix_EffectDone_t d, void * arg)
     int Mix_UnregisterAllEffects(int chan)
     int Mix_AllocateChannels(int numchans)
-    Mix_Chunk * Mix_LoadWAV(char *filename)
+
+    ctypedef struct SDL_RWops:
+        pass
+    Mix_Chunk *Mix_LoadWAV_RW(SDL_RWops *src, int freesrc)
+    SDL_RWops *SDL_RWFromMem(void *mem, int size)
+
+
     int Mix_QuerySpec(int *frequency,uint16_t *format,int *channels)
     int Mix_Volume(int chan, int volume)
 
