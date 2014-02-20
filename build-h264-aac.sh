@@ -85,10 +85,7 @@ for version in $FFMPEG_ARCHS; do
 			ARM_FLAGS="$ARM_FLAGS -marm --sysroot=$SYSROOT"
 			EXTRA_CFLAGS="$ARM_FLAGS $ARM_CFLAGS -miphoneos-version-min=${MIN_VERSION} -mthumb"
 			EXTRA_LDFLAGS="$ARM_FLAGS $ARM_LDFLAGS -miphoneos-version-min=${MIN_VERSION}"
-			#EXTRA_LDFLAGS="-Wl,--fix-cortex-a8"
-			# Runtime choosing neon vs non-neon requires
-			# renamed files
-			ABI="armeabi-neon"
+			ABI="armeabi-a8"
 			;;
 		neon)
 			echo "Arch neon is not supported yet"
