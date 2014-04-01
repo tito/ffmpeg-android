@@ -577,6 +577,7 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
                 if vs.avr == NULL:
                     #with gil:
                     #    print 'Audio need resample, but unable to create avr'
+                    avcodec_free_frame(&frame)
                     return -1
 
                 #with gil:
@@ -601,6 +602,7 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
                 if ret != 0:
                     #with gil:
                     #    print 'Audio need resample, but unable to open it.'
+                    avcodec_free_frame(&frame)
                     return -1
 
                 vs.resample_sample_fmt = frame.format
@@ -617,6 +619,7 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
                 if tmp_out == NULL:
                     #with gil:
                     #    print 'Unable to realloc audio buffer'
+                    avcodec_free_frame(&frame)
                     return -1
                 vs.audio_buf = <uint8_t *>tmp_out
 
@@ -644,15 +647,18 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
             vs.audio_clock += <double>data_size / <double>(n * mix_rate)
 
             # We have data, return it and come back for more later */
+            avcodec_free_frame(&frame)
             return data_size
 
         if pkt.data != flush_pkt.data:
             av_free_packet(pkt)
 
         if vs.quit:
+            avcodec_free_frame(&frame)
             return -1
 
         if packet_queue_get(&vs.audioq, pkt, 0) < 0:
+            avcodec_free_frame(&frame)
             return -1
 
         if pkt.data == flush_pkt.data:
@@ -665,6 +671,7 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
         if pkt.pts != AV_NOPTS_VALUE:
             vs.audio_clock = av_q2d(vs.audio_st.time_base) * pkt.pts
 
+    avcodec_free_frame(&frame)
     return 0
 
 @cython.cdivision(True)
@@ -788,7 +795,7 @@ cdef void alloc_picture(void *userdata) nogil:
 
     vp = &vs.pictq[vs.pictq_windex]
     if vp.bmp:
-        free(vp.bmp)
+        avcodec_free_frame(&vp.bmp)
         return
     vp.width = vs.video_st.codec.width
     vp.height = vs.video_st.codec.height
@@ -955,8 +962,13 @@ cdef int video_thread(void *arg) nogil:
 
         av_free_packet(packet)
 
-    av_free(pFrame)
+    avcodec_free_frame(&pFrame)
     return 0
+
+cdef void stream_component_close(VideoState *vs, int stream_index) with gil:
+    cdef AVCodecContext *codecCtx
+    codecCtx = vs.pFormatCtx.streams[stream_index].codec
+    avcodec_close(codecCtx)
 
 @cython.cdivision(True)
 cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
@@ -1309,6 +1321,34 @@ cdef class FFVideo:
             SDL_DestroyMutex(vs.pictq_mutex)
         if vs.pictq_cond != NULL:
             SDL_DestroyCond(vs.pictq_cond)
+
+        if vs.audioStream >= 0:
+            stream_component_close(vs, vs.audioStream)
+            vs.audioStream = -1
+        if vs.videoStream >= 0:
+            stream_component_close(vs, vs.videoStream)
+            vs.videoStream = -1
+        if vs.avr != NULL:
+            avresample_free(&vs.avr)
+        if vs.audio_buf != NULL:
+            av_free(vs.audio_buf)
+            vs.audio_buf = NULL
+        if vs.pFormatCtx != NULL:
+            avformat_free_context(vs.pFormatCtx)
+            vs.pFormatCtx = NULL
+        if vs.img_convert_ctx != NULL:
+            sws_freeContext(vs.img_convert_ctx)
+            vs.img_convert_ctx = NULL
+
+        cdef VideoPicture *vp
+        cdef int index
+        for index in xrange(VIDEO_PICTURE_QUEUE_SIZE):
+            vp = &vs.pictq[index]
+            if vp.ff_data != NULL:
+                av_free(vp.ff_data)
+                vp.ff_data = NULL
+            if vp.bmp != NULL:
+                avcodec_free_frame(&vp.bmp)
 
         av_free(vs)
         self.vs = NULL
