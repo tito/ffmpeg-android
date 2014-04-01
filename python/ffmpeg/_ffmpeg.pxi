@@ -82,7 +82,8 @@ cdef extern from "libavcodec/avcodec.h" nogil:
     ctypedef int (*lockmgr_t)(void **mutex, AVLockOp op)
     int av_lockmgr_register(lockmgr_t cb)
 
-    AVFrame *avcodec_alloc_frame()
+    AVFrame *avcodec_alloc_frame() 
+    void avcodec_free_frame(AVFrame **)
     int avcodec_decode_video2(AVCodecContext *avctx, AVFrame *picture,
                          int *got_picture_ptr, AVPacket *avpkt)
     int avcodec_decode_audio4(AVCodecContext *avctx, AVFrame *frame, int
@@ -151,6 +152,7 @@ cdef extern from "libavformat/avformat.h" nogil:
     int avformat_open_input(AVFormatContext **ic, char *filename,
             AVInputFormat *fmt, AVDictionary **options) with gil
     int avformat_find_stream_info(AVFormatContext *ic, AVDictionary **options)
+    void avformat_free_context(AVFormatContext *s)
     int av_read_frame(AVFormatContext *s, AVPacket *pkt)
     void av_close_input_file(AVFormatContext *s)
 
@@ -174,6 +176,7 @@ cdef extern from "libswscale/swscale.h" nogil:
     SwsContext *sws_getContext(int srcW, int srcH, int srcFormat,
             int dstW, int dstH, int dstFormat, int flags,
             SwsFilter *srcFilter, SwsFilter *dstFilter, double *param)
+    void sws_freeContext(SwsContext *)
 
 cdef extern from "libavutil/avutil.h" nogil:
     void *av_realloc(void *ptr, size_t size)
