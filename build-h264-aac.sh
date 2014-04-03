@@ -50,7 +50,7 @@ for version in $FFMPEG_ARCHS; do
 	# note: yeap, fPIC is already activated, but doesn't work when compiling shared python.
 	# some refs http://www.gentoo.org/proj/en/base/amd64/howtos/index.xml?part=1&chap=3,
 	# but no doc found to explain the real issue :/
-	FLAGS="$FLAGS --disable-asm"
+	#FLAGS="$FLAGS --disable-asm"
 
 	# needed to prevent _ffmpeg.so: version node not found for symbol av_init_packet@LIBAVFORMAT_52
 	# /usr/bin/ld: failed to set dynamic section sizes: Bad value
@@ -75,13 +75,14 @@ for version in $FFMPEG_ARCHS; do
 	case "$version" in
 		x86)
 
-			EXTRA_CFLAGS=""
+			EXTRA_CFLAGS="-O0 -ggdb"
 			#EXTRA_LDFLAGS="-Wl,-Bsymbolic"
 			EXTRA_LDFLAGS=""
 			ABI="x86"
 			;;
 		ios)
-			FLAGS="$FLAGS --enable-cross-compile --arch=arm --target-os=darwin"
+			export PATH=$PATH:$(pwd)/..
+			FLAGS="$FLAGS --enable-cross-compile --arch=armv7 --target-os=darwin --cpu=cortex-a8"
 			ARM_FLAGS="$ARM_FLAGS -marm --sysroot=$SYSROOT"
 			EXTRA_CFLAGS="$ARM_FLAGS $ARM_CFLAGS -miphoneos-version-min=${MIN_VERSION} -mthumb"
 			EXTRA_LDFLAGS="$ARM_FLAGS $ARM_LDFLAGS -miphoneos-version-min=${MIN_VERSION}"
@@ -137,6 +138,9 @@ for version in $FFMPEG_ARCHS; do
 	set -x
 	./configure $FLAGS --extra-cflags="$EXTRA_CFLAGS" --extra-ldflags="$EXTRA_LDFLAGS" \
 		| tee $DEST/configuration.txt
+	if [ "$version" == "ios" ]; then
+		perl -pi -e 's/HAVE_INLINE_ASM 1/HAVE_INLINE_ASM 0/' config.h
+	fi
 	set +x
 	[ $PIPESTATUS == 0 ] || exit 1
 	make clean

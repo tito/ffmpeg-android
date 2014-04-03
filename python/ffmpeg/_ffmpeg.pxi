@@ -154,6 +154,7 @@ cdef extern from "libavformat/avformat.h" nogil:
     int avformat_find_stream_info(AVFormatContext *ic, AVDictionary **options)
     void avformat_free_context(AVFormatContext *s)
     int av_read_frame(AVFormatContext *s, AVPacket *pkt)
+    void avformat_close_input(AVFormatContext **ic)
     void av_close_input_file(AVFormatContext *s)
 
     void *av_malloc(unsigned int size) nogil
