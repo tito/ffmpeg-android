@@ -34,6 +34,7 @@ cdef extern from "libavcodec/avcodec.h" nogil:
         unsigned char **data
         int *linesize
         int64_t pts
+        int64_t pkt_pts;
         int repeat_pict
         int nb_samples
         int format
@@ -52,8 +53,6 @@ cdef extern from "libavcodec/avcodec.h" nogil:
         int channels
         AVCodec *codec
         AVMediaType codec_type
-        int (*get_buffer)(AVCodecContext *c, AVFrame *pic)
-        void (*release_buffer)(AVCodecContext *c, AVFrame *pic)
         AVRational time_base
         AVSampleFormat sample_fmt
     struct AVPicture:
@@ -82,8 +81,8 @@ cdef extern from "libavcodec/avcodec.h" nogil:
     ctypedef int (*lockmgr_t)(void **mutex, AVLockOp op)
     int av_lockmgr_register(lockmgr_t cb)
 
-    AVFrame *avcodec_alloc_frame() 
-    void avcodec_free_frame(AVFrame **)
+    AVFrame *av_frame_alloc()
+    void av_frame_free(AVFrame **)
     int avcodec_decode_video2(AVCodecContext *avctx, AVFrame *picture,
                          int *got_picture_ptr, AVPacket *avpkt)
     int avcodec_decode_audio4(AVCodecContext *avctx, AVFrame *frame, int
@@ -100,7 +99,7 @@ cdef extern from "libavcodec/avcodec.h" nogil:
     int avcodec_default_get_buffer(AVCodecContext *s, AVFrame *pic)
     void avcodec_default_release_buffer(AVCodecContext *s, AVFrame *pic)
 
-    void avcodec_get_frame_defaults(AVFrame *)
+    void av_frame_unref(AVFrame *)
 
 cdef extern from "libavresample/avresample.h" nogil:
     struct ResampleContext:

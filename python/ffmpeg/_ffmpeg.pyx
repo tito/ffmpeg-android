@@ -81,8 +81,6 @@ DEF FF_REFRESH_EVENT                = 2
 DEF FF_QUIT_EVENT                   = 3
 DEF FF_SCHEDULE_EVENT               = 4
 
-cdef uint64_t global_video_pkt_pts = AV_NOPTS_VALUE
-
 ctypedef void (*event_callback_t)(void *)
 
 cdef struct Event:
@@ -529,11 +527,11 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
             got_frame = 0
 
             if frame == NULL:
-                frame = avcodec_alloc_frame()
+                frame = av_frame_alloc()
                 if frame == NULL:
                     return -1
             else:
-                avcodec_get_frame_defaults(frame)
+                av_frame_unref(frame)
 
             len1 = avcodec_decode_audio4(vs.audio_st.codec,
                     frame, &got_frame, pkt)
@@ -577,7 +575,7 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
                 if vs.avr == NULL:
                     #with gil:
                     #    print 'Audio need resample, but unable to create avr'
-                    avcodec_free_frame(&frame)
+                    av_frame_free(&frame)
                     return -1
 
                 #with gil:
@@ -602,7 +600,7 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
                 if ret != 0:
                     #with gil:
                     #    print 'Audio need resample, but unable to open it.'
-                    avcodec_free_frame(&frame)
+                    av_frame_free(&frame)
                     return -1
 
                 vs.resample_sample_fmt = frame.format
@@ -619,7 +617,7 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
                 if tmp_out == NULL:
                     #with gil:
                     #    print 'Unable to realloc audio buffer'
-                    avcodec_free_frame(&frame)
+                    av_frame_free(&frame)
                     return -1
                 vs.audio_buf = <uint8_t *>tmp_out
 
@@ -647,18 +645,18 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
             vs.audio_clock += <double>data_size / <double>(n * mix_rate)
 
             # We have data, return it and come back for more later */
-            avcodec_free_frame(&frame)
+            av_frame_free(&frame)
             return data_size
 
         if pkt.data != flush_pkt.data:
             av_free_packet(pkt)
 
         if vs.quit:
-            avcodec_free_frame(&frame)
+            av_frame_free(&frame)
             return -1
 
         if packet_queue_get(&vs.audioq, pkt, 0) < 0:
-            avcodec_free_frame(&frame)
+            av_frame_free(&frame)
             return -1
 
         if pkt.data == flush_pkt.data:
@@ -671,7 +669,7 @@ cdef int audio_decode_frame(VideoState *vs, double *pts_ptr) nogil:
         if pkt.pts != AV_NOPTS_VALUE:
             vs.audio_clock = av_q2d(vs.audio_st.time_base) * pkt.pts
 
-    avcodec_free_frame(&frame)
+    av_frame_free(&frame)
     return 0
 
 @cython.cdivision(True)
@@ -795,14 +793,14 @@ cdef void alloc_picture(void *userdata) nogil:
 
     vp = &vs.pictq[vs.pictq_windex]
     if vp.bmp:
-        avcodec_free_frame(&vp.bmp)
+        av_frame_free(&vp.bmp)
         return
     vp.width = vs.video_st.codec.width
     vp.height = vs.video_st.codec.height
 
     vp.ff_data_size = avpicture_get_size(AV_PIX_FMT_RGB24, vp.width, vp.height)
     vp.ff_data = <unsigned char *>av_malloc(vp.ff_data_size * sizeof(unsigned char))
-    vp.bmp = avcodec_alloc_frame()
+    vp.bmp = av_frame_alloc()
     avpicture_fill(<AVPicture *>vp.bmp, vp.ff_data, AV_PIX_FMT_RGB24,
             vp.width, vp.height)
 
@@ -904,19 +902,6 @@ cdef double synchronize_video(VideoState *vs, AVFrame *src_frame, double pts) no
     return pts
 
 
-cdef int our_get_buffer(AVCodecContext *c, AVFrame *pic) nogil:
-    cdef int ret = avcodec_default_get_buffer(c, pic)
-    cdef uint64_t *pts = <uint64_t*>av_malloc(sizeof(uint64_t))
-    memcpy(pts, &global_video_pkt_pts, sizeof(uint64_t))
-    pic.opaque = pts
-    return ret
-
-
-cdef void our_release_buffer(AVCodecContext *c, AVFrame *pic) nogil:
-    if pic != NULL: av_freep(&pic.opaque)
-    avcodec_default_release_buffer(c, pic)
-
-
 cdef int video_thread(void *arg) nogil:
     cdef VideoState *vs = <VideoState *>arg
     cdef AVPacket pkt1, *packet = &pkt1
@@ -924,7 +909,7 @@ cdef int video_thread(void *arg) nogil:
     cdef AVFrame *pFrame
     cdef double pts, ptst = 0
 
-    pFrame = avcodec_alloc_frame()
+    pFrame = av_frame_alloc()
 
     while True:
         if packet_queue_get(&vs.videoq, packet, 1) < 0:
@@ -937,15 +922,12 @@ cdef int video_thread(void *arg) nogil:
 
         pts = 0
 
-        # Save global pts to be stored in pFrame
-        global_video_pkt_pts = packet.pts
         # Decode video frame
         len1 = avcodec_decode_video2(
                 vs.video_st.codec, pFrame, &frameFinished, packet)
-        if packet.dts == AV_NOPTS_VALUE and pFrame.opaque:
-            memcpy(&ptst, pFrame.opaque, sizeof(uint64_t))
-            if ptst != AV_NOPTS_VALUE:
-                pts = ptst
+        if packet.dts == AV_NOPTS_VALUE:
+            if pFrame.pkt_pts != AV_NOPTS_VALUE:
+                pts = pFrame.pkt_pts
         elif packet.dts != AV_NOPTS_VALUE:
             pts = packet.dts
         else:
@@ -962,7 +944,7 @@ cdef int video_thread(void *arg) nogil:
 
         av_free_packet(packet)
 
-    avcodec_free_frame(&pFrame)
+    av_frame_free(&pFrame)
     return 0
 
 cdef void stream_component_close(VideoState *vs, int stream_index) with gil:
@@ -1060,8 +1042,6 @@ cdef int stream_component_open(VideoState *vs, int stream_index) with gil:
 
         packet_queue_init(&vs.videoq)
         vs.video_tid = SDL_CreateThread(video_thread, vs)
-        codecCtx.get_buffer = our_get_buffer
-        codecCtx.release_buffer = our_release_buffer
 
     else:
         pass
@@ -1348,7 +1328,7 @@ cdef class FFVideo:
                 av_free(vp.ff_data)
                 vp.ff_data = NULL
             if vp.bmp != NULL:
-                avcodec_free_frame(&vp.bmp)
+                av_frame_free(&vp.bmp)
 
         av_free(vs)
         self.vs = NULL
